@@ -1,0 +1,45 @@
+[Unit]
+Description=smoker reverse-proxy WAF (HTTP/HTTPS)
+Documentation=https://github.com/ostap-mykhaylyak/smoker
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/sbin/smoker --config /etc/smoker/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+
+# nftables DNAT + binding privileged ports requires these capabilities.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+# Hardening: ProtectSystem=strict makes the whole filesystem read-only EXCEPT
+# the two paths below. So /etc/smoker/config.yaml is effectively read-only
+# (config is re-read on reload, never written), while these stay writable:
+#   - /var/log/smoker           logs + reputation.db (runtime state)
+#   - /etc/smoker/templates     git-synced signature feeds, recompiled hot
+#   - /etc/smoker/whitelist     git-synced IP/CIDR allow-list repo
+#   - /etc/smoker/blocklist     git-synced IP/CIDR deny-list repo
+# If you do not use in-process git-sync, drop these entries to keep the whole
+# config tree read-only.
+ProtectSystem=strict
+ReadWritePaths=/var/log/smoker /etc/smoker/templates /etc/smoker/whitelist /etc/smoker/blocklist
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Graceful shutdown: give in-flight connections time to drain (see SIGTERM
+# handling in main.go, 25s internal budget).
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

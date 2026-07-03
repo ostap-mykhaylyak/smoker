@@ -1,0 +1,38 @@
+# Normalize line endings across Windows and Linux checkouts.
+# smoker targets Linux: shell scripts, the Makefile and the systemd unit MUST be
+# LF even when checked out on Windows, otherwise they break at runtime.
+# `text=auto` lets Git store everything with LF in the repo; `eol=lf` forces LF
+# in the working tree too.
+
+* text=auto eol=lf
+
+# Explicit source / text types (LF).
+*.go        text eol=lf
+*.mod       text eol=lf
+*.sum       text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.js        text eol=lf
+*.sh        text eol=lf
+*.service   text eol=lf
+Makefile    text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+.editorconfig  text eol=lf
+
+# Go source is treated as such by GitHub language stats / diffs.
+*.go linguist-language=Go
+
+# Binary assets (never touch EOL, never diff).
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.db   binary
+bin/*  binary

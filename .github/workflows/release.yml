@@ -1,0 +1,67 @@
+name: Release
+
+# Push a tag like v1.0.0 to build static Linux binaries and attach them to a
+# GitHub Release:
+#   git tag v1.0.0 && git push origin v1.0.0
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # required to create the release and upload assets
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  build:
+    name: Build & release ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Resolve dependencies
+        run: go mod tidy
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          NAME="smoker-${VERSION}-${GOOS}-${GOARCH}"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o smoker ./cmd/smoker
+          # The binary self-provisions config/templates/assets on first run
+          # (`smoker --init`), so the bundle only needs the binary, the unit
+          # file and docs.
+          mkdir -p "dist/${NAME}"
+          cp smoker "dist/${NAME}/smoker"
+          cp internal/bootstrap/smoker.service README.md LICENSE "dist/${NAME}/"
+          tar -C dist -czf "${NAME}.tar.gz" "${NAME}"
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Each matrix job appends its artifacts to the same release for the tag.
+          files: |
+            smoker-*.tar.gz
+            smoker-*.tar.gz.sha256
+          generate_release_notes: true

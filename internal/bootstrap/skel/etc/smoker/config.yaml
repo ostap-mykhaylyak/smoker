@@ -1,0 +1,96 @@
+# /etc/smoker/config.yaml — smoker reverse-proxy WAF configuration.
+# Hot-reloaded via fsnotify: edits apply without a restart (file is only read,
+# never written, so /etc/smoker can be mounted read-only).
+
+listen:
+  http: "0.0.0.0:18080"    # internal port; nftables DNATs public :80 here
+  https: "0.0.0.0:18443"   # internal port; nftables DNATs public :443 here
+  http3: false             # enable HTTP/3 (QUIC/UDP on the https address) + Alt-Svc advertising; open the same UDP port in the firewall
+
+backend:
+  http: "127.0.0.1:80"     # real nginx/apache backend (plaintext on localhost)
+  https: "127.0.0.1:443"
+  # Set use_tls: true when the backend serves real content over HTTPS and the
+  # plaintext :80 only 301-redirects to https. smoker preserves the client Host
+  # as SNI, so the backend picks the right vhost and the cert verifies against
+  # the real domain (not 127.0.0.1); the TCP dial still targets backend.https.
+  use_tls: false
+  # Enable only if the backend cert's SANs don't cover the served hostnames
+  # (trusted local backend). Usually not needed.
+  insecure_skip_verify: false
+
+firewall:
+  enabled: true
+  public_http_port: 80
+  public_https_port: 443
+  internal_http_port: 18080
+  internal_https_port: 18443
+  fail_open: true          # on shutdown, remove redirect so traffic still flows
+
+tls:
+  nginx_sites_glob:
+    - "/etc/nginx/sites-enabled/*"
+  apache_sites_glob:
+    - "/etc/apache2/sites-enabled/*"
+  autocert:
+    enabled: false
+    cache_dir: "/var/log/smoker/acme-cache"
+    email: "admin@example.com"
+    domains: []
+
+templates:
+  dir: "/etc/smoker/templates"   # git repo overlaid here (same-name overwritten, custom kept)
+  sync_interval: "6h"            # templates only; whitelist/blocklist have their own
+  git:
+    url: "https://codeberg.org/ostap-mykhaylyak/templates"
+    branch: "main"
+
+reputation:
+  db_path: "/var/log/smoker/reputation.db"
+  block_threshold: 5       # violations within window -> blocked
+  window: "10m"
+  greylist_ttl: "30m"
+  block_ttl: "24h"
+  clean_ttl: "1h"
+
+challenge:
+  enabled: true
+  assets_dir: "/var/www/smoker"
+  ttl: "1h"
+  secret: "CHANGE-ME-to-a-long-random-string"   # also signs session cookies; if left as-is, an ephemeral random secret is used
+  pow_bits: 16                                   # JS proof-of-work difficulty (leading zero bits); ~16 ≈ sub-second in a browser, costly for bots. 0 disables.
+
+session:
+  cookie_name: "smoker_sid"
+  ttl: "30m"
+  max_entries: 100000
+
+compression:
+  zstd: false              # compress compressible backend responses with zstd for clients that support it
+  min_size: 1024           # skip responses smaller than this (bytes)
+
+# IP/CIDR access lists. Each `git` repo is overlaid onto its `dir` on its OWN
+# `sync_interval` (same-name files overwritten, local *.ips kept); every *.ips
+# file under `dir` is merged (plus optional inline `ips`). git.url: "" disables
+# syncing.
+whitelist:
+  dir: "/etc/smoker/whitelist"        # bypass ALL filtering (trusted IPs)
+  sync_interval: "1h"
+  ips: []
+  git:
+    url: "https://codeberg.org/ostap-mykhaylyak/whitelist"
+    branch: "main"
+blocklist:
+  dir: "/etc/smoker/blocklist"        # always denied
+  sync_interval: "1h"
+  ips: []
+  git:
+    url: "https://codeberg.org/ostap-mykhaylyak/blocklist"
+    branch: "main"
+
+logging:
+  dir: "/var/log/smoker"
+
+# Detection Engine / Reputation fail-open: on internal failure, allow traffic
+# (true, availability) or block it (false, security).
+fail_open: false

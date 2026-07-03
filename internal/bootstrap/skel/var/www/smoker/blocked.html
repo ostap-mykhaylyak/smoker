@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accesso bloccato</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #140f11; color: #f0e6e6;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+    .card { background: #211316; border: 1px solid #3a2126; border-radius: 12px;
+            padding: 2.5rem 2rem; max-width: 460px; text-align: center; }
+    h1 { font-size: 1.4rem; margin: 0 0 .5rem; color: #ff6b6b; }
+    p { color: #c9a9ad; font-size: .95rem; }
+    code { color: #ffb3b3; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>403 — Richiesta bloccata</h1>
+    <p>La tua richiesta è stata bloccata dal sistema di protezione.</p>
+    <p>Motivo: <code>{{REASON}}</code></p>
+    <p>Se ritieni si tratti di un errore, contatta l'amministratore del sito.</p>
+  </div>
+</body>
+</html>

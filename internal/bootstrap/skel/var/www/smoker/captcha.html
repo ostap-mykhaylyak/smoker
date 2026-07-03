@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verifica manuale</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f1115; color: #e6e6e6;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+    .card { background: #171a21; border: 1px solid #262b36; border-radius: 12px;
+            padding: 2.5rem 2rem; max-width: 420px; text-align: center; }
+    button { background: #4c8bf5; border: 0; color: #fff; padding: .7rem 1.4rem;
+             border-radius: 8px; font-size: 1rem; cursor: pointer; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Confermi di essere umano?</h1>
+    <p>Premi il pulsante per continuare verso il sito.</p>
+    <form method="POST" action="{{VERIFY_URL}}">
+      <input type="hidden" name="token" value="{{TOKEN}}">
+      <input type="hidden" name="return" value="{{RETURN_URL}}">
+      <button type="submit">Continua</button>
+    </form>
+  </div>
+</body>
+</html>

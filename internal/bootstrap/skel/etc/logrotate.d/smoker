@@ -1,0 +1,22 @@
+# logrotate policy for smoker — installed to /etc/logrotate.d/smoker.
+# smoker keeps no rotation logic in the binary (no heavy runtime deps): it just
+# reopens its log files on SIGHUP, so logrotate renames then signals it.
+#
+# reputation.db is NOT a *.log file and is deliberately left untouched.
+
+/var/log/smoker/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    # Recreate each stream with the perms smoker uses (see internal/logging).
+    create 0640 root root
+    sharedscripts
+    postrotate
+        # Tell smoker to reopen its log files (main.go handles SIGHUP -> reopen).
+        # ExecReload in the unit is `kill -HUP $MAINPID`, so a reload is enough.
+        systemctl reload smoker.service 2>/dev/null || true
+    endscript
+}

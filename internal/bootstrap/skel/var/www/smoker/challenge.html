@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verifica di sicurezza</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f1115; color: #e6e6e6;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+    .card { background: #171a21; border: 1px solid #262b36; border-radius: 12px;
+            padding: 2.5rem 2rem; max-width: 420px; text-align: center; }
+    h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+    p { color: #9aa4b2; font-size: .95rem; }
+    .spinner { width: 34px; height: 34px; border: 3px solid #2a3140; border-top-color: #4c8bf5;
+               border-radius: 50%; margin: 1.25rem auto; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Verifica in corso…</h1>
+    <div class="spinner"></div>
+    <p>Stiamo verificando che la tua connessione sia sicura prima di procedere.
+       Sarai reindirizzato automaticamente.</p>
+    <noscript><p>Attiva JavaScript per completare la verifica.</p></noscript>
+
+    <!-- Proof-of-work JS challenge: the browser must find a nonce such that
+         SHA-256(token:nonce) has POW_BITS leading zero bits, then submit it. A
+         trivial bot that only echoes the token cannot pass. -->
+    <form id="f" method="POST" action="{{VERIFY_URL}}">
+      <input type="hidden" name="token" value="{{TOKEN}}">
+      <input type="hidden" name="nonce" value="">
+      <input type="hidden" name="bits" value="{{POW_BITS}}">
+      <input type="hidden" name="return" value="{{RETURN_URL}}">
+    </form>
+    <script>
+      (async function () {
+        var f = document.getElementById('f');
+        var token = f.token.value, bits = parseInt(f.bits.value, 10) || 0;
+        var enc = new TextEncoder();
+        function lz(u) {
+          var n = 0;
+          for (var i = 0; i < u.length; i++) {
+            var x = u[i];
+            if (x === 0) { n += 8; continue; }
+            for (var m = 128; m > 0; m >>= 1) { if (x & m) return n; n++; }
+            return n;
+          }
+          return n;
+        }
+        var nonce = 0;
+        if (bits > 0 && window.crypto && crypto.subtle) {
+          for (;;) {
+            var h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(token + ':' + nonce)));
+            if (lz(h) >= bits) break;
+            nonce++;
+          }
+        }
+        f.nonce.value = nonce;
+        f.submit();
+      })();
+    </script>
+  </div>
+</body>
+</html>

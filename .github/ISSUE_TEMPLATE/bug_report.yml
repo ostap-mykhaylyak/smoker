@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a problem with smoker (not a security vulnerability)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **Do not report security vulnerabilities here.** See
+        [SECURITY.md](../blob/main/SECURITY.md) for private reporting.
+  - type: input
+    id: version
+    attributes:
+      label: smoker version
+      description: Output of `smoker --version` (or commit hash).
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / distribution / kernel
+      placeholder: Debian 12, kernel 6.1, nftables 1.0.6
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and the impact.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. config.yaml with ...
+        2. request ...
+        3. observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Excerpts from /var/log/smoker/*.log (redact sensitive data).
+      render: text

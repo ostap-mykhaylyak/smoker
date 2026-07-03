@@ -1,0 +1,31 @@
+# https://editorconfig.org — consistent encoding & line endings on every OS.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = tab
+indent_size = 4
+
+# Go uses tabs (gofmt); leave indent_style = tab from [*].
+[*.go]
+indent_style = tab
+
+# YAML must not use tabs.
+[*.{yaml,yml}]
+indent_style = space
+indent_size = 2
+
+[*.{md,html,css,js,json}]
+indent_style = space
+indent_size = 2
+
+# Makefiles require real tabs.
+[Makefile]
+indent_style = tab
+
+# Preserve trailing whitespace in Markdown (line breaks).
+[*.md]
+trim_trailing_whitespace = false
