@@ -58,7 +58,7 @@ jobs:
           sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
 
       - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Each matrix job appends its artifacts to the same release for the tag.
           files: |
