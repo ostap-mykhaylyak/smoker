@@ -388,8 +388,10 @@ make test              # go test ./... -race
 
 Covered: template parsing/compilation and inline matching, the behavioral
 `block-cold-add-to-cart` rule end-to-end (cold vs. warm session), the reputation
-state machine + BoltDB persistence, and an end-to-end proxy test (clean
-passthrough, SQLi block, blocked-IP fail-fast, greylist→challenge).
+state machine + BoltDB persistence, the access lists and trusted-proxy real-IP
+recovery, and an end-to-end proxy test (clean passthrough, SQLi block,
+blocked-IP fail-fast, greylist→challenge, request-id header/page, backend 5xx +
+unreachable logging to `backend.log`, real client IP behind a trusted CDN).
 
 ## Non-goals
 

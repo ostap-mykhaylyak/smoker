@@ -18,14 +18,15 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 # Hardening: ProtectSystem=strict makes the whole filesystem read-only EXCEPT
 # the two paths below. So /etc/smoker/config.yaml is effectively read-only
 # (config is re-read on reload, never written), while these stay writable:
-#   - /var/log/smoker           logs + reputation.db (runtime state)
-#   - /etc/smoker/templates     git-synced signature feeds, recompiled hot
-#   - /etc/smoker/whitelist     git-synced IP/CIDR allow-list repo
-#   - /etc/smoker/blocklist     git-synced IP/CIDR deny-list repo
+#   - /var/log/smoker             logs + reputation.db (runtime state)
+#   - /etc/smoker/templates       git-synced signature feeds, recompiled hot
+#   - /etc/smoker/whitelist       git-synced IP/CIDR allow-list repo
+#   - /etc/smoker/blocklist       git-synced IP/CIDR deny-list repo
+#   - /etc/smoker/trusted-proxies git-synced trusted front-proxy IP repo (CDN)
 # If you do not use in-process git-sync, drop these entries to keep the whole
 # config tree read-only.
 ProtectSystem=strict
-ReadWritePaths=/var/log/smoker /etc/smoker/templates /etc/smoker/whitelist /etc/smoker/blocklist
+ReadWritePaths=/var/log/smoker /etc/smoker/templates /etc/smoker/whitelist /etc/smoker/blocklist /etc/smoker/trusted-proxies
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true

@@ -95,3 +95,31 @@ func TestEmptyAccessListsAllowAll(t *testing.T) {
 		t.Error("empty lists must not match any IP")
 	}
 }
+
+func TestTrustedProxies(t *testing.T) {
+	c := Default()
+	// A couple of Cloudflare-style ranges (v4 + v6).
+	c.TrustedProxies.IPs = []string{"173.245.48.0/20", "2400:cb00::/32"}
+	if err := c.compileAccessLists(); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if !c.TrustedProxy("173.245.48.1") {
+		t.Error("IPv4 range should be a trusted proxy")
+	}
+	if !c.TrustedProxy("2400:cb00::5") {
+		t.Error("IPv6 range should be a trusted proxy")
+	}
+	if c.TrustedProxy("8.8.8.8") {
+		t.Error("a non-listed IP must not be a trusted proxy")
+	}
+
+	// The default (empty) list must trust nobody, so forwarding headers are
+	// ignored and smoker stays edge-mode.
+	d := Default()
+	if err := d.compileAccessLists(); err != nil {
+		t.Fatal(err)
+	}
+	if d.TrustedProxy("173.245.48.1") {
+		t.Error("empty trusted_proxies must not match any IP")
+	}
+}
