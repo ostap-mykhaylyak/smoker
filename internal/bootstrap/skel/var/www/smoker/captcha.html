@@ -11,6 +11,9 @@
             padding: 2.5rem 2rem; max-width: 420px; text-align: center; }
     button { background: #4c8bf5; border: 0; color: #fff; padding: .7rem 1.4rem;
              border-radius: 8px; font-size: 1rem; cursor: pointer; margin-top: 1rem; }
+    .trace { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #262b36;
+             color: #6b7280; font-size: .8rem; }
+    .trace code { color: #9aa4b2; }
   </style>
 </head>
 <body>
@@ -22,6 +25,8 @@
       <input type="hidden" name="return" value="{{RETURN_URL}}">
       <button type="submit">Continua</button>
     </form>
+    <p class="trace">Il tuo IP: <code>{{CLIENT_IP}}</code><br>
+       ID richiesta: <code>{{REQUEST_ID}}</code></p>
   </div>
 </body>
 </html>

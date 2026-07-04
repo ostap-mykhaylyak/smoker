@@ -150,6 +150,12 @@ type Config struct {
 	Whitelist AccessList `yaml:"whitelist"`
 	Blocklist AccessList `yaml:"blocklist"`
 
+	// TrustedProxies are the IPs/CIDRs of front proxies (e.g. Cloudflare) whose
+	// forwarding headers smoker honors to recover the real client IP. Same
+	// dir/ips/git/sync_interval structure as the access lists. Empty (default)
+	// means smoker is the edge and inbound forwarding headers are NOT trusted.
+	TrustedProxies AccessList `yaml:"trusted_proxies"`
+
 	Logging struct {
 		Dir string `yaml:"dir"`
 	} `yaml:"logging"`
@@ -159,9 +165,10 @@ type Config struct {
 	FailOpen bool `yaml:"fail_open"`
 
 	// Parsed access lists (populated by Load; not from YAML).
-	whitelistNets []netip.Prefix
-	blocklistNets []netip.Prefix
-	accessWarns   []string // entries skipped as invalid (for logging)
+	whitelistNets    []netip.Prefix
+	blocklistNets    []netip.Prefix
+	trustedProxyNets []netip.Prefix
+	accessWarns      []string // entries skipped as invalid (for logging)
 }
 
 // AccessListWarnings returns entries that were skipped as invalid IPs/CIDRs
@@ -175,6 +182,7 @@ func (c *Config) compileAccessLists() error {
 	c.accessWarns = nil
 	c.whitelistNets = c.parsePrefixes("whitelist", c.Whitelist.IPs)
 	c.blocklistNets = c.parsePrefixes("blocklist", c.Blocklist.IPs)
+	c.trustedProxyNets = c.parsePrefixes("trusted_proxies", c.TrustedProxies.IPs)
 	return nil
 }
 
@@ -211,6 +219,12 @@ func (c *Config) Whitelisted(ip string) bool { return matchAny(c.whitelistNets, 
 
 // Blocklisted reports whether ip is in the static blocklist (always denied).
 func (c *Config) Blocklisted(ip string) bool { return matchAny(c.blocklistNets, ip) }
+
+// TrustedProxy reports whether ip is a configured trusted front proxy (e.g.
+// Cloudflare) whose forwarding header may be honored to recover the real client
+// IP. With none configured this is always false and forwarding headers are
+// ignored (smoker is the edge).
+func (c *Config) TrustedProxy(ip string) bool { return matchAny(c.trustedProxyNets, ip) }
 
 func matchAny(nets []netip.Prefix, ip string) bool {
 	if len(nets) == 0 {
@@ -271,6 +285,11 @@ func Default() *Config {
 	c.Blocklist.SyncInterval = Duration(1 * time.Hour)
 	c.Blocklist.Git.URL = "https://codeberg.org/ostap-mykhaylyak/blocklist"
 	c.Blocklist.Git.Branch = "main"
+	// Trusted proxies: dir created empty, no default remote. Manual *.ips files
+	// are loaded at startup; git sync only runs if an operator sets git.url.
+	c.TrustedProxies.Dir = paths.TrustedProxiesDir
+	c.TrustedProxies.SyncInterval = Duration(12 * time.Hour)
+	c.TrustedProxies.Git.Branch = "main"
 	c.Logging.Dir = paths.LogDir
 	c.FailOpen = false
 	return c
@@ -311,6 +330,11 @@ func (c *Config) loadAccessListFiles() error {
 		return fmt.Errorf("blocklist: %w", err)
 	}
 	c.Blocklist.IPs = append(c.Blocklist.IPs, bl...)
+	tp, err := readListDir(c.TrustedProxies.Dir)
+	if err != nil {
+		return fmt.Errorf("trusted_proxies: %w", err)
+	}
+	c.TrustedProxies.IPs = append(c.TrustedProxies.IPs, tp...)
 	return nil
 }
 

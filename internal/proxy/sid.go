@@ -22,6 +22,18 @@ func sidFor(ip, ua string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// newRequestID returns a short random identifier for a single request. It is
+// exposed to the visitor (X-Request-Id header + shown on block/challenge pages)
+// and written to access.log/blocked.log, so an operator can correlate a user
+// report ("I was blocked, request id abc123") with the exact log line.
+func newRequestID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "0000000000000000"
+	}
+	return hex.EncodeToString(b) // 16 hex chars
+}
+
 // newSignedSID mints a fresh random session id and returns "<id>.<mac>", where
 // mac is HMAC(id, secret). This is the value of the smoker session cookie.
 func newSignedSID(secret []byte) string {

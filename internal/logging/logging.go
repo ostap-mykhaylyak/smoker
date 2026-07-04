@@ -4,6 +4,7 @@
 //
 //	access.log      every request forwarded to the backend (clean)
 //	blocked.log     every blocked/challenged request, with template-id + reason
+//	backend.log     backend errors: 5xx responses + unreachable/transport failures
 //	reputation.log  IP state transitions (clean -> greylisted -> blocked ...)
 //	smoker.log      operational logs (startup, reload, internal errors)
 //
@@ -26,6 +27,7 @@ import (
 type Loggers struct {
 	Access     *slog.Logger
 	Blocked    *slog.Logger
+	Backend    *slog.Logger
 	Reputation *slog.Logger
 	Service    *slog.Logger
 
@@ -96,6 +98,9 @@ func Open(dir string) (*Loggers, error) {
 		return nil, err
 	}
 	if l.Blocked, err = mk(paths.BlockedLog); err != nil {
+		return nil, err
+	}
+	if l.Backend, err = mk(paths.BackendLog); err != nil {
 		return nil, err
 	}
 	if l.Reputation, err = mk(paths.ReputationLog); err != nil {

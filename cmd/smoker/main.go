@@ -277,7 +277,8 @@ func run(cfgPath string, noFirewall bool) error {
 			nc := cfgMgr.Get()
 			logs.Service.Info("config reloaded",
 				"whitelist_dir", nc.Whitelist.Dir, "whitelist", len(nc.Whitelist.IPs),
-				"blocklist_dir", nc.Blocklist.Dir, "blocklist", len(nc.Blocklist.IPs))
+				"blocklist_dir", nc.Blocklist.Dir, "blocklist", len(nc.Blocklist.IPs),
+				"trusted_proxies", len(nc.TrustedProxies.IPs))
 			loadTemplates(engine, nc.Templates.Dir, logs)
 			n, _ := certStore.Reload(nc.TLS.NginxSitesGlob, nc.TLS.ApacheSitesGlob)
 			logs.Service.Info("certificates reloaded", "count", n)
@@ -404,6 +405,14 @@ func startSyncLoops(stop <-chan struct{}, cfgMgr *config.Manager, engine detect.
 	go syncLoop(stop, cfgMgr.Get().Blocklist.SyncInterval.Std(), func() {
 		syncAccessList(cfgMgr, logs, "blocklist")
 	})
+	// Trusted proxies have no default remote: only run a git-sync loop if the
+	// operator configured one (e.g. mirroring Cloudflare's published ranges).
+	// Manual *.ips files in the dir are still loaded at startup and config reload.
+	if cfgMgr.Get().TrustedProxies.Git.URL != "" {
+		go syncLoop(stop, cfgMgr.Get().TrustedProxies.SyncInterval.Std(), func() {
+			syncAccessList(cfgMgr, logs, "trusted_proxies")
+		})
+	}
 }
 
 // syncLoop runs sync() immediately and then every interval until stop closes.
@@ -428,8 +437,11 @@ func syncLoop(stop <-chan struct{}, interval time.Duration, sync func()) {
 // so the new prefixes take effect. label is "whitelist" or "blocklist".
 func syncAccessList(cfgMgr *config.Manager, logs *logging.Loggers, label string) {
 	al := cfgMgr.Get().Whitelist
-	if label == "blocklist" {
+	switch label {
+	case "blocklist":
 		al = cfgMgr.Get().Blocklist
+	case "trusted_proxies":
+		al = cfgMgr.Get().TrustedProxies
 	}
 	if err := detect.SyncRepo(al.Dir, al.Git.URL, al.Git.Branch); err != nil {
 		logs.Service.Warn(label+" sync", "err", err.Error())
@@ -440,8 +452,11 @@ func syncAccessList(cfgMgr *config.Manager, logs *logging.Loggers, label string)
 	}
 	nc := cfgMgr.Get()
 	list := nc.Whitelist
-	if label == "blocklist" {
+	switch label {
+	case "blocklist":
 		list = nc.Blocklist
+	case "trusted_proxies":
+		list = nc.TrustedProxies
 	}
 	logs.Service.Info(label+" reloaded", "dir", list.Dir, "entries", len(list.IPs))
 	for _, wmsg := range nc.AccessListWarnings() {

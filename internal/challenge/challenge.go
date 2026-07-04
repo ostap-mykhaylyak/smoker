@@ -67,7 +67,9 @@ func (m *Manager) logf(msg string, args ...any) {
 }
 
 // ServeChallenge writes the interstitial challenge page for a greylisted client.
-func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, ip string) {
+// ip and reqID are rendered onto the page (and reqID is the same id logged for
+// this request) so a visitor can quote them to the operator for tracing.
+func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, ip, reqID string) {
 	// crypto.subtle (used to solve the PoW) is only available in a secure
 	// context; over plain HTTP fall back to a no-PoW token so the client is not
 	// dead-ended. The site's HTTPS challenges still carry the full difficulty.
@@ -87,6 +89,8 @@ func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, ip stri
 		"VERIFY_URL": VerifyPath,
 		"RETURN_URL": safeReturn(ret),
 		"POW_BITS":   strconv.Itoa(bits),
+		"CLIENT_IP":  ip,
+		"REQUEST_ID": reqID,
 	}
 	page := m.render("challenge.html", vars)
 	// Safety net: if the on-disk asset predates the PoW protocol (no nonce
@@ -103,8 +107,10 @@ func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, ip stri
 }
 
 // ServeBlocked writes the hard-block page (used for blocked IPs / block action).
-func (m *Manager) ServeBlocked(w http.ResponseWriter, r *http.Request, code int, reason string) {
-	page := m.render("blocked.html", map[string]string{"REASON": reason})
+// ip and reqID are rendered onto the page so a blocked visitor can quote them
+// to the operator, who greps the logs by req_id.
+func (m *Manager) ServeBlocked(w http.ResponseWriter, r *http.Request, ip, reqID string, code int, reason string) {
+	page := m.render("blocked.html", map[string]string{"REASON": reason, "CLIENT_IP": ip, "REQUEST_ID": reqID})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
@@ -113,7 +119,7 @@ func (m *Manager) ServeBlocked(w http.ResponseWriter, r *http.Request, code int,
 
 // HandleVerify validates a token; on success clears the IP + session and
 // redirects back. Returns true if it handled the request (caller must stop).
-func (m *Manager) HandleVerify(w http.ResponseWriter, r *http.Request, ip, sessionKey string) bool {
+func (m *Manager) HandleVerify(w http.ResponseWriter, r *http.Request, ip, reqID, sessionKey string) bool {
 	if r.URL.Path != VerifyPath {
 		return false
 	}
@@ -121,13 +127,13 @@ func (m *Manager) HandleVerify(w http.ResponseWriter, r *http.Request, ip, sessi
 	bits, ok := m.validateToken(token)
 	if !ok {
 		m.logf("challenge verify failed", "ip", ip, "reason", "invalid-or-expired-token")
-		m.ServeChallenge(w, r, ip)
+		m.ServeChallenge(w, r, ip, reqID)
 		return true
 	}
 	if !verifyPoW(token, r.FormValue("nonce"), bits) {
 		m.logf("challenge verify failed", "ip", ip, "reason", "pow-failed", "bits", bits)
 		// Don't dead-end the client: re-issue a fresh, solvable challenge.
-		m.ServeChallenge(w, r, ip)
+		m.ServeChallenge(w, r, ip, reqID)
 		return true
 	}
 	if m.cleaner != nil {
@@ -262,7 +268,8 @@ func fallbackPage(name string, vars map[string]string) string {
 	switch name {
 	case "blocked.html":
 		return `<!doctype html><meta charset="utf-8"><title>Blocked</title>` +
-			`<h1>403 — Request blocked</h1><p>` + htmlEscape(vars["REASON"]) + `</p>`
+			`<h1>403 — Request blocked</h1><p>` + htmlEscape(vars["REASON"]) + `</p>` +
+			traceLine(vars)
 	default:
 		return `<!doctype html><meta charset="utf-8"><title>Verifica</title>` +
 			`<h1>Verifica in corso…</h1>` +
@@ -271,8 +278,20 @@ func fallbackPage(name string, vars map[string]string) string {
 			`<input type="hidden" name="nonce" value="">` +
 			`<input type="hidden" name="bits" value="` + htmlEscape(vars["POW_BITS"]) + `">` +
 			`<input type="hidden" name="return" value="` + htmlEscape(vars["RETURN_URL"]) + `"></form>` +
+			traceLine(vars) +
 			`<script>` + powSolverJS + `</script>`
 	}
+}
+
+// traceLine renders the visitor's IP and request id as a small footer so it is
+// present even on the built-in fallback pages (asset missing).
+func traceLine(vars map[string]string) string {
+	ip, id := vars["CLIENT_IP"], vars["REQUEST_ID"]
+	if ip == "" && id == "" {
+		return ""
+	}
+	return `<p style="color:#888;font-size:.8rem">IP: <code>` + htmlEscape(ip) +
+		`</code> · ID: <code>` + htmlEscape(id) + `</code></p>`
 }
 
 // powSolverJS finds a nonce so SHA-256("<token>:<nonce>") has >= bits leading

@@ -12,6 +12,9 @@
     h1 { font-size: 1.4rem; margin: 0 0 .5rem; color: #ff6b6b; }
     p { color: #c9a9ad; font-size: .95rem; }
     code { color: #ffb3b3; }
+    .trace { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #3a2126;
+             color: #8a7276; font-size: .8rem; }
+    .trace code { color: #c9a9ad; }
   </style>
 </head>
 <body>
@@ -19,7 +22,10 @@
     <h1>403 — Richiesta bloccata</h1>
     <p>La tua richiesta è stata bloccata dal sistema di protezione.</p>
     <p>Motivo: <code>{{REASON}}</code></p>
-    <p>Se ritieni si tratti di un errore, contatta l'amministratore del sito.</p>
+    <p>Se ritieni si tratti di un errore, contatta l'amministratore del sito
+       indicando i dati qui sotto.</p>
+    <p class="trace">Il tuo IP: <code>{{CLIENT_IP}}</code><br>
+       ID richiesta: <code>{{REQUEST_ID}}</code></p>
   </div>
 </body>
 </html>

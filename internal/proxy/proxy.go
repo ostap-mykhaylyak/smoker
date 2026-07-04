@@ -26,6 +26,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/ostap-mykhaylyak/smoker/internal/challenge"
@@ -50,6 +51,7 @@ const (
 	ctxSetCookie
 	ctxBackend
 	ctxClientTLS // bool: was the inbound client connection TLS?
+	ctxReqID     // string: per-request id shown to the visitor and logged
 )
 
 // backendTarget is the per-request upstream chosen from the inbound listener:
@@ -155,12 +157,19 @@ func (p *Proxy) ConnContext(ctx context.Context, c net.Conn) context.Context {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	cfg := p.cfg.Get()
-	clientIP := realClientIP(r)
+	clientIP := realClientIP(r, cfg)
 
 	// Capture the response status/size for the logs (so access.log records
 	// 200/301/404/... — key for spotting scanner 404 storms).
 	sw := &statusWriter{ResponseWriter: w}
 	w = sw
+
+	// Assign a per-request id: exposed as X-Request-Id, shown on any block/
+	// challenge page served to the visitor, and written to every log line for
+	// this request, so a user report can be traced to the exact log entry.
+	reqID := newRequestID()
+	w.Header().Set("X-Request-Id", reqID)
+	r = r.WithContext(context.WithValue(r.Context(), ctxReqID, reqID))
 
 	// Fail-open guard: if the inspection stack panics and fail-open is enabled,
 	// forward the request rather than dropping it.
@@ -189,7 +198,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.Blocklisted(clientIP) {
-		p.challenge.ServeBlocked(w, r, http.StatusForbidden, "your address is blocked")
+		p.challenge.ServeBlocked(w, r, clientIP, reqID, http.StatusForbidden, "your address is blocked")
 		p.logBlocked(clientIP, r, "", "static-blocklist", "block", "high", http.StatusForbidden)
 		return
 	}
@@ -197,24 +206,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (1) IP reputation fail-fast.
 	switch p.rep.Lookup(clientIP) {
 	case reputation.StateBlocked:
-		p.challenge.ServeBlocked(w, r, http.StatusForbidden, "your address is temporarily blocked")
+		p.challenge.ServeBlocked(w, r, clientIP, reqID, http.StatusForbidden, "your address is temporarily blocked")
 		p.logBlocked(clientIP, r, "", "reputation:blocked", "block", string(reputation.StateBlocked), http.StatusForbidden)
 		return
 	case reputation.StateGreylisted:
 		// (2) allow the verify endpoint through even while greylisted.
 		sessionKey := p.sessionKey(r, clientIP)
-		if p.challenge.HandleVerify(w, r, clientIP, sessionKey) {
+		if p.challenge.HandleVerify(w, r, clientIP, reqID, sessionKey) {
 			return
 		}
 		// (3) serve challenge for everything else.
 		if cfg.Challenge.Enabled {
-			p.challenge.ServeChallenge(w, r, clientIP)
+			p.challenge.ServeChallenge(w, r, clientIP, reqID)
 			return
 		}
 	default:
 		// clean: verify endpoint should also short-circuit if hit.
 		if r.URL.Path == challenge.VerifyPath {
-			if p.challenge.HandleVerify(w, r, clientIP, p.sessionKey(r, clientIP)) {
+			if p.challenge.HandleVerify(w, r, clientIP, reqID, p.sessionKey(r, clientIP)) {
 				return
 			}
 		}
@@ -241,6 +250,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) applyAction(w http.ResponseWriter, r *http.Request, ip, sessionKey string, dec detect.Decision, cfg *config.Config, view *detect.RequestView, start time.Time) {
 	inc := dec.Incident
+	reqID := reqIDFrom(r)
 	switch dec.Action {
 	case detect.ActionLogOnly:
 		// Tuning mode: pass through to the backend and record what WOULD be
@@ -253,13 +263,13 @@ func (p *Proxy) applyAction(w http.ResponseWriter, r *http.Request, ip, sessionK
 		return
 	case detect.ActionChallenge:
 		p.rep.RegisterViolation(ip, "detect:"+inc.TemplateID)
-		p.challenge.ServeChallenge(w, r, ip)
+		p.challenge.ServeChallenge(w, r, ip, reqID)
 		p.logBlocked(ip, r, inc.TemplateID, inc.Reason, "challenge", string(inc.Severity), http.StatusServiceUnavailable)
 		return
 	case detect.ActionRateLimit:
 		p.rep.RegisterViolation(ip, "detect:"+inc.TemplateID)
 		w.Header().Set("Retry-After", "10")
-		p.challenge.ServeBlocked(w, r, http.StatusTooManyRequests, "rate limited")
+		p.challenge.ServeBlocked(w, r, ip, reqID, http.StatusTooManyRequests, "rate limited")
 		p.logBlocked(ip, r, inc.TemplateID, inc.Reason, "rate-limit", string(inc.Severity), http.StatusTooManyRequests)
 		return
 	case detect.ActionBan:
@@ -278,7 +288,15 @@ func (p *Proxy) applyAction(w http.ResponseWriter, r *http.Request, ip, sessionK
 }
 
 func (p *Proxy) block(w http.ResponseWriter, r *http.Request, ip string, code int, reason string, inc *detect.Incident, cfg *config.Config) {
-	p.challenge.ServeBlocked(w, r, code, reason)
+	p.challenge.ServeBlocked(w, r, ip, reqIDFrom(r), code, reason)
+}
+
+// reqIDFrom returns the per-request id stashed in the context by ServeHTTP.
+func reqIDFrom(r *http.Request) string {
+	if v, ok := r.Context().Value(ctxReqID).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // forward proxies a clean (or fail-open) request to the backend.
@@ -327,6 +345,14 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 	cfg := p.cfg.Get()
+
+	// Record backend-origin errors (nginx/app 5xx) in the dedicated backend.log.
+	// This is the actual response from the backend; transport failures (backend
+	// unreachable) are handled separately in backendError.
+	if resp.StatusCode >= 500 {
+		p.logBackend(req, resp.StatusCode, "backend 5xx response", nil)
+	}
+
 	needSet := true
 	if c, err := req.Cookie(cfg.Session.CookieName); err == nil {
 		if _, ok := verifySID(p.secret, c.Value); ok {
@@ -366,9 +392,38 @@ func (p *Proxy) backendError(w http.ResponseWriter, r *http.Request, err error) 
 	if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
 		return
 	}
-	p.logs.Service.Error("backend error", "err", err, "path", r.URL.Path)
+	// Transport-level failure (backend down, refused, timeout): record it in the
+	// dedicated backend.log and serve a 502.
+	p.logBackend(r, http.StatusBadGateway, "backend unreachable", err)
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = w.Write([]byte("502 Bad Gateway"))
+}
+
+// logBackend writes a backend error (5xx response or transport failure) to
+// backend.log, tagged with the same req_id/ip shown on any page and in
+// access.log, so a single request can be traced across streams.
+func (p *Proxy) logBackend(r *http.Request, status int, reason string, err error) {
+	attrs := []any{
+		slog.String("req_id", reqIDFrom(r)),
+		slog.String("ip", clientIPFrom(r)),
+		slog.String("method", r.Method),
+		slog.String("host", r.Host),
+		slog.String("path", r.URL.Path),
+		slog.Int("status", status),
+		slog.String("reason", reason),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+	}
+	p.logs.Backend.Error("backend error", attrs...)
+}
+
+// clientIPFrom returns the real client IP stashed in the context by forward.
+func clientIPFrom(r *http.Request) string {
+	if v, ok := r.Context().Value(ctxSetCookie).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // buildView reads a bounded copy of the body and assembles a RequestView. The
@@ -431,6 +486,7 @@ func (p *Proxy) sessionKey(r *http.Request, ip string) string {
 
 func (p *Proxy) logAccess(ip string, r *http.Request, status int, bytes int64, dur time.Duration) {
 	p.logs.Access.Info("request",
+		slog.String("req_id", reqIDFrom(r)),
 		slog.String("ip", ip),
 		slog.String("method", r.Method),
 		slog.String("host", r.Host),
@@ -445,6 +501,7 @@ func (p *Proxy) logAccess(ip string, r *http.Request, status int, bytes int64, d
 
 func (p *Proxy) logBlocked(ip string, r *http.Request, templateID, reason, action, severity string, status int) {
 	p.logs.Blocked.Warn("blocked",
+		slog.String("req_id", reqIDFrom(r)),
 		slog.String("ip", ip),
 		slog.String("method", r.Method),
 		slog.String("host", r.Host),
@@ -459,18 +516,61 @@ func (p *Proxy) logBlocked(ip string, r *http.Request, templateID, reason, actio
 
 // --- pure helpers ---
 
-// realClientIP returns the source IP of the connection. With nftables REDIRECT
-// the client source is NOT rewritten, so RemoteAddr is the true client IP. We
-// deliberately do NOT trust inbound X-Forwarded-For (smoker is the edge).
-func realClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// realClientIP returns the true client IP. By default it is the source IP of
+// the connection (with nftables REDIRECT the client source is NOT rewritten, so
+// RemoteAddr is the real client) and inbound forwarding headers are deliberately
+// ignored — smoker is the edge. But when the direct connection comes from a
+// configured trusted proxy (e.g. Cloudflare), the real visitor IP is taken from
+// that proxy's forwarding header instead, so reputation, access lists and logs
+// track the visitor rather than the CDN.
+func realClientIP(r *http.Request, cfg *config.Config) string {
+	host := hostOnly(r.RemoteAddr)
+	if cfg.TrustedProxy(host) {
+		if fwd := forwardedClientIP(r); fwd != "" {
+			return fwd
+		}
+	}
+	return host
+}
+
+// hostOnly strips the port from RemoteAddr and normalizes the address.
+func hostOnly(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = remoteAddr
 	}
 	if ap, err := netip.ParseAddr(host); err == nil {
 		return ap.String()
 	}
 	return host
+}
+
+// forwardedClientIP extracts the originating client IP from the headers a
+// trusted front proxy sets: Cloudflare's CF-Connecting-IP first, then the
+// leftmost X-Forwarded-For entry, then X-Real-IP. Returns "" if none holds a
+// valid IP. Only called after the direct peer is confirmed to be a trusted
+// proxy, so these headers cannot be spoofed by an arbitrary client.
+func forwardedClientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); v != "" {
+		if ap, err := netip.ParseAddr(v); err == nil {
+			return ap.String()
+		}
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first := xff
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			first = xff[:i]
+		}
+		if ap, err := netip.ParseAddr(strings.TrimSpace(first)); err == nil {
+			return ap.String()
+		}
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+		if ap, err := netip.ParseAddr(v); err == nil {
+			return ap.String()
+		}
+	}
+	return ""
 }
 
 func joinValues(v []string) string {

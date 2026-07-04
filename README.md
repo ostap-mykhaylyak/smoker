@@ -170,12 +170,39 @@ overlaid onto its `dir`: repo files overwrite same-named ones, local hand-added
 lines are skipped (logged), never fatal. Set `git.url: ""` to disable syncing.
 Manage entries by pushing to the repo, or drop a `.ips` file into the directory.
 
+### Trusted proxies (real client IP behind a CDN)
+
+By default smoker is the edge and ignores inbound `X-Forwarded-For` — the
+connection source IP is the real client. When smoker instead runs **behind a CDN
+or reverse proxy (e.g. Cloudflare)**, the connection source is the CDN, so the
+real visitor IP must be read from a forwarding header. List the CDN's IP ranges
+in the `trusted_proxies` directory (same `dir` / inline `ips` / `git` structure
+as the access lists) and, only when the direct peer is one of them, smoker takes
+the real client IP from **`CF-Connecting-IP`**, then the leftmost
+**`X-Forwarded-For`**, then **`X-Real-IP`**. That recovered IP is what
+reputation, the whitelist/blocklist and every log line use, so you track the
+visitor and not the CDN.
+
+```yaml
+trusted_proxies:
+  dir: "/etc/smoker/trusted-proxies"
+  ips: ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]   # e.g. Cloudflare
+  git: { url: "", branch: "main" }     # or mirror a published ranges repo
+```
+
+Because the header is trusted **only** when the direct connection comes from a
+listed proxy, a client connecting directly cannot spoof its IP. With
+`trusted_proxies` empty (default), behavior is unchanged. Drop Cloudflare's
+published ranges into a `.ips` file (or point `git.url` at a repo mirroring
+them, refreshed on `sync_interval`).
+
 ## Logs (`/var/log/smoker/`)
 
 | File             | Contents                                                        |
 |------------------|-----------------------------------------------------------------|
-| `access.log`     | every request forwarded to the backend: ip, method, host, path, query, **status** (200/301/404/…), bytes, ua, duration |
-| `blocked.log`    | every blocked/challenged request: ip, path/method, **status**, template-id, severity, action, reason |
+| `access.log`     | every request forwarded to the backend: **req_id**, ip, method, host, path, query, **status** (200/301/404/…), bytes, ua, duration |
+| `blocked.log`    | every blocked/challenged request: **req_id**, ip, path/method, **status**, template-id, severity, action, reason |
+| `backend.log`    | backend errors only: **req_id**, ip, method, host, path, **status** (5xx), reason, err — both backend `5xx` responses and unreachable/transport failures (502) |
 | `reputation.log` | IP state transitions (clean ⇄ greylisted ⇄ blocked)             |
 | `smoker.log`     | operational logs (startup, config/template reload, errors)      |
 
@@ -185,6 +212,15 @@ burst of `404`s hunting for vulnerable plugins:
 ```sh
 # top IPs by 404 count in access.log
 jq -r 'select(.status==404) | .ip' /var/log/smoker/access.log | sort | uniq -c | sort -rn | head
+```
+
+Every request carries a **`req_id`** (also returned in the `X-Request-Id`
+response header and printed on the block/challenge page, next to the visitor's
+IP). When a user reports being blocked, ask for the request id shown on the page
+and grep for it directly:
+
+```sh
+grep <req_id> /var/log/smoker/*.log        # or: jq 'select(.req_id=="<req_id>")'
 ```
 
 Rotation is delegated to external `logrotate` (no rotation logic in the binary):

@@ -88,6 +88,23 @@ blocklist:
     url: "https://codeberg.org/ostap-mykhaylyak/blocklist"
     branch: "main"
 
+# Trusted front proxies (e.g. Cloudflare). When the DIRECT connection comes from
+# one of these IPs/CIDRs, smoker trusts its forwarding header to recover the real
+# visitor IP (CF-Connecting-IP, then leftmost X-Forwarded-For, then X-Real-IP)
+# and uses THAT for reputation, whitelist/blocklist and logging. Leave empty
+# (default) when smoker is the edge — inbound forwarding headers are then ignored
+# and RemoteAddr is used. Every *.ips file under `dir` is merged (plus inline
+# `ips`); set git.url to mirror a published list (e.g. Cloudflare's ranges) and
+# it is refreshed on `sync_interval` (git sync only runs when git.url is set).
+trusted_proxies:
+  dir: "/etc/smoker/trusted-proxies"
+  sync_interval: "12h"
+  ips: []
+  # ips: ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]  # e.g. Cloudflare
+  git:
+    url: ""
+    branch: "main"
+
 logging:
   dir: "/var/log/smoker"
 

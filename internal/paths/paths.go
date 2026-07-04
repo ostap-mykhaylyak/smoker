@@ -29,6 +29,11 @@ const (
 	WhitelistDir = "/etc/smoker/whitelist"
 	BlocklistDir = "/etc/smoker/blocklist"
 
+	// TrustedProxiesDir holds IP/CIDR *.ips files of front proxies (e.g.
+	// Cloudflare) whose forwarding headers smoker trusts to recover the real
+	// client IP. Same *.ips + git structure as the access-list dirs.
+	TrustedProxiesDir = "/etc/smoker/trusted-proxies"
+
 	// LogDir holds all structured log files and runtime state (reputation.db).
 	LogDir = "/var/log/smoker"
 
@@ -44,4 +49,7 @@ const (
 	BlockedLog    = "blocked.log"
 	ReputationLog = "reputation.log"
 	ServiceLog    = "smoker.log"
+	// BackendLog records errors coming from the backend (5xx responses and
+	// unreachable-backend/transport failures), separate from access.log.
+	BackendLog = "backend.log"
 )

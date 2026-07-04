@@ -51,6 +51,7 @@ dirs:
 	install -d -m 0755 -o root          -g $(SMOKER_GRP) $(TMPL_DIR)
 	install -d -m 0755 -o root          -g $(SMOKER_GRP) $(CONF_DIR)/whitelist
 	install -d -m 0755 -o root          -g $(SMOKER_GRP) $(CONF_DIR)/blocklist
+	install -d -m 0755 -o root          -g $(SMOKER_GRP) $(CONF_DIR)/trusted-proxies
 	install -d -m 0750 -o $(SMOKER_USER) -g $(SMOKER_GRP) $(LOG_DIR)
 	install -d -m 0755 -o root          -g $(SMOKER_GRP) $(WWW_DIR)
 
