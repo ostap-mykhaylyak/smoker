@@ -285,10 +285,12 @@ func Default() *Config {
 	c.Blocklist.SyncInterval = Duration(1 * time.Hour)
 	c.Blocklist.Git.URL = "https://codeberg.org/ostap-mykhaylyak/blocklist"
 	c.Blocklist.Git.Branch = "main"
-	// Trusted proxies: dir created empty, no default remote. Manual *.ips files
-	// are loaded at startup; git sync only runs if an operator sets git.url.
+	// Trusted proxies (e.g. Cloudflare ranges): synced from the default repo on
+	// its own interval, overlaid onto the dir. Set git.url: "" to disable and
+	// manage the *.ips files by hand.
 	c.TrustedProxies.Dir = paths.TrustedProxiesDir
 	c.TrustedProxies.SyncInterval = Duration(12 * time.Hour)
+	c.TrustedProxies.Git.URL = "https://codeberg.org/ostap-mykhaylyak/trusted-proxies"
 	c.TrustedProxies.Git.Branch = "main"
 	c.Logging.Dir = paths.LogDir
 	c.FailOpen = false

@@ -100,9 +100,9 @@ trusted_proxies:
   dir: "/etc/smoker/trusted-proxies"
   sync_interval: "12h"
   ips: []
-  # ips: ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]  # e.g. Cloudflare
+  # ips: ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]  # inline, in addition to the repo
   git:
-    url: ""
+    url: "https://codeberg.org/ostap-mykhaylyak/trusted-proxies"   # set "" to disable and manage *.ips by hand
     branch: "main"
 
 logging:

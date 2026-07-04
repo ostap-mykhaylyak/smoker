@@ -172,9 +172,10 @@ whitelist:
   git: { url: "https://codeberg.org/ostap-mykhaylyak/whitelist", branch: "main" }
 ```
 
-Each repo (defaults: `codeberg.org/ostap-mykhaylyak/{whitelist,blocklist}`) is
-pulled on its **own** `sync_interval` — templates, whitelist and blocklist run
-independently (e.g. `whitelist: 10m`, `blocklist: 30m`, `templates: 6h`) — and
+Each repo (defaults: `codeberg.org/ostap-mykhaylyak/{whitelist,blocklist,trusted-proxies}`)
+is pulled on its **own** `sync_interval` — templates, whitelist, blocklist and
+trusted-proxies run independently (e.g. `whitelist: 10m`, `blocklist: 30m`,
+`trusted-proxies: 12h`, `templates: 6h`) — and
 overlaid onto its `dir`: repo files overwrite same-named ones, local hand-added
 `.ips` files are kept. Non-`.ips` files (README, LICENSE) are ignored and invalid
 lines are skipped (logged), never fatal. Set `git.url: ""` to disable syncing.
@@ -196,8 +197,9 @@ visitor and not the CDN.
 ```yaml
 trusted_proxies:
   dir: "/etc/smoker/trusted-proxies"
-  ips: ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]   # e.g. Cloudflare
-  git: { url: "", branch: "main" }     # or mirror a published ranges repo
+  # Synced by default from codeberg.org/ostap-mykhaylyak/trusted-proxies
+  # (Cloudflare ranges). Add inline entries and/or set git.url: "" to disable.
+  git: { url: "https://codeberg.org/ostap-mykhaylyak/trusted-proxies", branch: "main" }
 ```
 
 Because the header is trusted **only** when the direct connection comes from a
