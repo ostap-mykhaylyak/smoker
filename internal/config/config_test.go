@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestAccessListFromDir(t *testing.T) {
@@ -93,6 +94,51 @@ func TestEmptyAccessListsAllowAll(t *testing.T) {
 	}
 	if c.Whitelisted("203.0.113.1") || c.Blocklisted("203.0.113.1") {
 		t.Error("empty lists must not match any IP")
+	}
+}
+
+func TestWatchAccessListsPicksUpNewFile(t *testing.T) {
+	dir := t.TempDir()
+	tpDir := filepath.Join(dir, "trusted-proxies")
+	if err := os.MkdirAll(tpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgYAML := fmt.Sprintf("listen:\n  http: \"127.0.0.1:0\"\nbackend:\n  http: \"127.0.0.1:80\"\n"+
+		"whitelist:\n  dir: \"\"\nblocklist:\n  dir: \"\"\ntrusted_proxies:\n  dir: %q\n", tpDir)
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Get().TrustedProxy("203.0.113.7") {
+		t.Fatal("must not match before the file is added")
+	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	reloaded := make(chan struct{}, 4)
+	if err := m.WatchAccessLists(stop,
+		func() { reloaded <- struct{}{} },
+		func(error) {},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drop a new *.ips file into the trusted-proxies dir; the watch must reload.
+	if err := os.WriteFile(filepath.Join(tpDir, "cloudflare.ips"), []byte("203.0.113.7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloaded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not reload after a .ips file was added")
+	}
+	if !m.Get().TrustedProxy("203.0.113.7") {
+		t.Error("the trusted proxy from the new file must be active after the reload")
 	}
 }
 

@@ -206,6 +206,14 @@ listed proxy, a client connecting directly cannot spoof its IP. With
 published ranges into a `.ips` file (or point `git.url` at a repo mirroring
 them, refreshed on `sync_interval`).
 
+> **File names must end in `.ips`.** Only `*.ips` files under `dir` are read
+> (so `README`/`LICENSE` in a synced repo are ignored). Cloudflare publishes its
+> ranges as files named `ips-v4` and `ips-v6` — rename them (e.g.
+> `cloudflare-v4.ips`, `cloudflare-v6.ips`) or they will be silently skipped.
+> smoker logs the loaded counts at startup (`access lists loaded … trusted_proxies N`)
+> and reloads the lists live when you add or edit a `.ips` file, so a count of
+> `0` there means the files were not picked up — check the extension.
+
 ## Logs (`/var/log/smoker/`)
 
 | File             | Contents                                                        |

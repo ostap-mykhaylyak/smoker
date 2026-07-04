@@ -521,3 +521,84 @@ func (m *Manager) Watch(stop <-chan struct{}, onError func(error), onReload func
 	}()
 	return nil
 }
+
+// WatchAccessLists watches the whitelist / blocklist / trusted-proxies
+// directories and reloads the config shortly after a change, so manually
+// added/edited/removed *.ips files take effect without a restart or a git sync
+// (trusted-proxies in particular usually has no git remote). Events are debounced
+// to coalesce editor and git-sync bursts. onReload runs after a successful
+// reload; onError on failure (the previous config is retained). It returns nil
+// without starting a goroutine when no access-list directory exists.
+func (m *Manager) WatchAccessLists(stop <-chan struct{}, onReload func(), onError func(error)) error {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	cfg := m.current.Load()
+	added := 0
+	for _, d := range []string{cfg.Whitelist.Dir, cfg.Blocklist.Dir, cfg.TrustedProxies.Dir} {
+		if d == "" {
+			continue
+		}
+		if err := w.Add(d); err == nil {
+			added++
+		}
+	}
+	if added == 0 {
+		_ = w.Close()
+		return nil
+	}
+
+	go func() {
+		defer w.Close()
+		const debounce = 400 * time.Millisecond
+		var (
+			timer  *time.Timer
+			timerC <-chan time.Time
+		)
+		arm := func() {
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(debounce)
+			timerC = timer.C
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case ev, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+					continue
+				}
+				// Only *.ips files feed the access lists; ignore README/.git noise.
+				if !strings.EqualFold(filepath.Ext(ev.Name), ".ips") {
+					continue
+				}
+				arm()
+			case <-timerC:
+				timerC = nil
+				if err := m.Reload(); err != nil {
+					if onError != nil {
+						onError(err)
+					}
+					continue
+				}
+				if onReload != nil {
+					onReload()
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				if onError != nil {
+					onError(err)
+				}
+			}
+		}
+	}()
+	return nil
+}

@@ -161,6 +161,18 @@ func run(cfgPath string, noFirewall bool) error {
 	defer logs.Close()
 	logs.Service.Info("starting smoker", "version", version, "config", cfgPath, "pid", os.Getpid())
 
+	// Report the access lists loaded from disk at startup so an operator can
+	// immediately confirm their entries were picked up (trusted-proxies has no
+	// git-sync log of its own). A count of 0 despite files present usually means
+	// the files are not named *.ips (e.g. Cloudflare's ips-v4 / ips-v6).
+	logs.Service.Info("access lists loaded",
+		"whitelist", len(cfg.Whitelist.IPs),
+		"blocklist", len(cfg.Blocklist.IPs),
+		"trusted_proxies", len(cfg.TrustedProxies.IPs))
+	for _, wmsg := range cfg.AccessListWarnings() {
+		logs.Service.Warn("access list: skipped invalid entry", "entry", wmsg)
+	}
+
 	// --- Reputation Manager (BoltDB) ---
 	rep, err := reputation.Open(cfg.Reputation.DBPath, reputation.Config{
 		BlockThreshold: cfg.Reputation.BlockThreshold,
@@ -289,6 +301,30 @@ func run(cfgPath string, noFirewall bool) error {
 
 	// --- Background: independent git-sync loops (templates + access lists) ---
 	startSyncLoops(stop, cfgMgr, engine, logs)
+
+	// --- Background: hot-reload access lists on manual file changes (fsnotify) ---
+	// Picks up added/edited *.ips files (whitelist, blocklist, trusted-proxies)
+	// without a restart or a git sync — important for trusted-proxies, which
+	// typically has no git remote.
+	if err := cfgMgr.WatchAccessLists(stop,
+		func() {
+			nc := cfgMgr.Get()
+			logs.Service.Info("access lists reloaded (file change)",
+				"whitelist", len(nc.Whitelist.IPs),
+				"blocklist", len(nc.Blocklist.IPs),
+				"trusted_proxies", len(nc.TrustedProxies.IPs))
+			for _, wmsg := range nc.AccessListWarnings() {
+				logs.Service.Warn("access list: skipped invalid entry", "entry", wmsg)
+			}
+		},
+		func(err error) { logs.Service.Error("access-list watch", "err", err) },
+	); err != nil {
+		logs.Service.Error("access-list watch init failed", "err", err)
+	} else {
+		logs.Service.Info("watching access lists for changes",
+			"whitelist_dir", cfg.Whitelist.Dir, "blocklist_dir", cfg.Blocklist.Dir,
+			"trusted_proxies_dir", cfg.TrustedProxies.Dir)
+	}
 
 	// --- Background: hot-reload templates on file changes (fsnotify) ---
 	if err := detect.WatchTemplates(cfg.Templates.Dir, stop,
