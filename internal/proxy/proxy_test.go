@@ -425,3 +425,42 @@ func TestLargeBodyForwardedWhole(t *testing.T) {
 		t.Errorf("backend received a truncated body: got %q, want %q", rr.Body.String(), want)
 	}
 }
+
+// A buffered request must stay rewindable (GetBody set, ContentLength correct) so
+// the backend Transport can retry it after a benign HTTP/2 GOAWAY instead of
+// surfacing a 502 to the client. Regression test for that production bug.
+func TestBufferedRequestIsRewindable(t *testing.T) {
+	env := setup(t)
+
+	// Empty body (typical static GET): ContentLength 0 lets the reverse proxy drop
+	// the body and keep the request retryable.
+	g := httptest.NewRequest("GET", "http://shop.example/wp-content/uploads/x.png", nil)
+	_ = env.px.buildView(g)
+	if g.ContentLength != 0 {
+		t.Errorf("empty GET must have ContentLength 0, got %d", g.ContentLength)
+	}
+	if g.GetBody == nil {
+		t.Error("empty GET must be rewindable (GetBody set) so a GOAWAY can be retried")
+	}
+
+	// Small POST body: rewindable and re-readable to the exact same bytes.
+	p := httptest.NewRequest("POST", "http://shop.example/submit", strings.NewReader("hello"))
+	view := env.px.buildView(p)
+	if string(view.Body) != "hello" {
+		t.Errorf("inspected body = %q, want hello", view.Body)
+	}
+	if p.ContentLength != 5 {
+		t.Errorf("ContentLength = %d, want 5", p.ContentLength)
+	}
+	if p.GetBody == nil {
+		t.Fatal("buffered POST must be rewindable (GetBody set)")
+	}
+	rc, err := p.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(rc)
+	if string(b) != "hello" {
+		t.Errorf("GetBody replay = %q, want hello", b)
+	}
+}

@@ -464,14 +464,27 @@ func (p *Proxy) buildView(r *http.Request) *detect.RequestView {
 	if r.Body != nil {
 		body, _ = io.ReadAll(io.LimitReader(r.Body, maxInspectBody))
 		if len(body) < maxInspectBody {
-			// Whole body consumed: nothing left to stream.
+			// Whole body consumed and buffered. Replace it with a REWINDABLE reader:
+			// resetting ContentLength and setting GetBody is essential so the backend
+			// Transport can retry the request after a benign connection loss — most
+			// importantly an HTTP/2 GOAWAY when the backend recycles a connection.
+			// Without it, a recycled backend connection surfaces to clients as a 502;
+			// and for empty (e.g. GET) requests ContentLength==0 lets the proxy drop
+			// the body entirely instead of sending a malformed chunked GET.
 			_ = r.Body.Close()
-			r.Body = io.NopCloser(bytes.NewReader(body))
+			buf := body
+			r.Body = io.NopCloser(bytes.NewReader(buf))
+			r.ContentLength = int64(len(buf))
+			r.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(buf)), nil
+			}
 		} else {
-			// Body may exceed the inspection buffer: forward the prefix we read
-			// plus whatever remains, so nothing is dropped. ContentLength is left
-			// unchanged (it still describes the full original body).
+			// Body exceeds the inspection buffer: forward the inspected prefix plus
+			// the untouched remainder so nothing is dropped. The remainder is a live
+			// stream that cannot be rewound, so these (large upload) requests are not
+			// retryable — acceptable, as they are non-idempotent POST/PUT bodies.
 			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+			r.GetBody = nil
 		}
 	}
 
