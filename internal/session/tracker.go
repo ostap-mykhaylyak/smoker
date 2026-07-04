@@ -44,6 +44,10 @@ type Tracker interface {
 	Record(key string, view *detect.RequestView)
 	// MarkChallengePassed flags a session as having solved a challenge.
 	MarkChallengePassed(key string)
+	// ChallengePassed reports whether the (still-live) session has solved a
+	// challenge. Used to grant a grace period so a visitor who already passed is
+	// not re-challenged in a loop.
+	ChallengePassed(key string) bool
 	// Len reports tracked sessions (for tests/metrics).
 	Len() int
 }
@@ -114,6 +118,16 @@ func (t *tracker) MarkChallengePassed(key string) {
 	r.challengePassed = true
 	r.lastSeen = t.now()
 	t.cache.Add(key, r)
+}
+
+func (t *tracker) ChallengePassed(key string) bool {
+	if key == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r, ok := t.get(key)
+	return ok && r.challengePassed
 }
 
 // Evaluate reports whether the session-matchers condition holds — i.e. whether

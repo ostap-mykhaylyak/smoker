@@ -50,8 +50,9 @@ const (
 	ctxOrigDst ctxKey = iota
 	ctxSetCookie
 	ctxBackend
-	ctxClientTLS // bool: was the inbound client connection TLS?
-	ctxReqID     // string: per-request id shown to the visitor and logged
+	ctxClientTLS  // bool: was the inbound client connection TLS?
+	ctxReqID      // string: per-request id shown to the visitor and logged
+	ctxCookieSet  // bool: the session cookie was already set earlier in the pipeline
 )
 
 // backendTarget is the per-request upstream chosen from the inbound listener:
@@ -184,7 +185,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			p.logs.Service.Error("panic in pipeline", "err", rec, "ip", clientIP, "path", r.URL.Path)
 			if cfg.FailOpen {
-				p.forward(w, r, clientIP, nil, cfg, start)
+				p.forward(w, r, clientIP, cfg, start)
 				return
 			}
 			p.block(w, r, clientIP, http.StatusServiceUnavailable, "internal error", nil, cfg)
@@ -194,13 +195,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (0) Static access lists (operator-controlled, hot-reloadable).
 	if cfg.Whitelisted(clientIP) {
 		// Trusted IP: bypass all filtering, stream straight to the backend.
-		p.forward(w, r, clientIP, nil, cfg, start)
+		p.forward(w, r, clientIP, cfg, start)
 		return
 	}
 	if cfg.Blocklisted(clientIP) {
 		p.challenge.ServeBlocked(w, r, clientIP, reqID, http.StatusForbidden, "your address is blocked")
 		p.logBlocked(clientIP, r, "", "static-blocklist", "block", "high", http.StatusForbidden)
 		return
+	}
+
+	// Establish a stable, signed session identity up front: if the client has no
+	// valid session cookie, mint one and set it now (even on a block/challenge
+	// response). This keeps the session key constant across the whole challenge
+	// flow — instead of switching from an IP+UA fingerprint to a cookie id only
+	// after the first backend response — so a passed challenge is remembered and
+	// behavioral history is not reset mid-visit.
+	sessionKey, cookieSet := p.ensureSession(w, r, clientIP)
+	if cookieSet {
+		r = r.WithContext(context.WithValue(r.Context(), ctxCookieSet, true))
 	}
 
 	// (1) IP reputation fail-fast.
@@ -211,27 +223,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case reputation.StateGreylisted:
 		// (2) allow the verify endpoint through even while greylisted.
-		sessionKey := p.sessionKey(r, clientIP)
 		if p.challenge.HandleVerify(w, r, clientIP, reqID, sessionKey) {
 			return
 		}
-		// (3) serve challenge for everything else.
-		if cfg.Challenge.Enabled {
+		// (3) serve a challenge — unless this session already solved one, in
+		// which case fall through (grace period, so a passed visitor is not
+		// re-challenged in a loop).
+		if cfg.Challenge.Enabled && !p.tracker.ChallengePassed(sessionKey) {
 			p.challenge.ServeChallenge(w, r, clientIP, reqID)
 			return
 		}
 	default:
 		// clean: verify endpoint should also short-circuit if hit.
 		if r.URL.Path == challenge.VerifyPath {
-			if p.challenge.HandleVerify(w, r, clientIP, reqID, p.sessionKey(r, clientIP)) {
+			if p.challenge.HandleVerify(w, r, clientIP, reqID, sessionKey) {
 				return
 			}
 		}
 	}
 
-	// (4) Build the request view (bounded body copy for inspection + replay).
+	// (4) Build the request view (bounded body copy for inspection; the full
+	// body is preserved for the backend, never truncated).
 	view := p.buildView(r)
-	sessionKey := p.sessionKey(r, clientIP)
 
 	dec := p.engine.Inspect(view, sessionKey)
 
@@ -242,7 +255,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (6) Clean passthrough.
-	p.forward(w, r, clientIP, view.Body, cfg, start)
+	p.forward(w, r, clientIP, cfg, start)
 	// Record the clean pageview for behavioral tracking (post-decision so a
 	// cold request has no self-generated prior pageview).
 	p.tracker.Record(sessionKey, view)
@@ -257,11 +270,20 @@ func (p *Proxy) applyAction(w http.ResponseWriter, r *http.Request, ip, sessionK
 		// blocked. The logged status is the ACTUAL status served to the client
 		// (not the would-be block code), so log-only entries don't look like
 		// enforced blocks.
-		p.forward(w, r, ip, view.Body, cfg, start)
+		p.forward(w, r, ip, cfg, start)
 		status, _ := statusInfo(w)
 		p.logBlocked(ip, r, inc.TemplateID, inc.Reason, "log-only", string(inc.Severity), status)
 		return
 	case detect.ActionChallenge:
+		// Grace: a session that already solved a challenge is not challenged
+		// again, so a challenge rule matching normal navigation cannot trap a
+		// verified visitor in a challenge -> pass -> challenge loop. Abuse rules
+		// (block / ban / rate-limit) below still enforce regardless.
+		if p.tracker.ChallengePassed(sessionKey) {
+			p.forward(w, r, ip, cfg, start)
+			p.tracker.Record(sessionKey, view)
+			return
+		}
 		p.rep.RegisterViolation(ip, "detect:"+inc.TemplateID)
 		p.challenge.ServeChallenge(w, r, ip, reqID)
 		p.logBlocked(ip, r, inc.TemplateID, inc.Reason, "challenge", string(inc.Severity), http.StatusServiceUnavailable)
@@ -299,13 +321,12 @@ func reqIDFrom(r *http.Request) string {
 	return ""
 }
 
-// forward proxies a clean (or fail-open) request to the backend.
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, ip string, body []byte, cfg *config.Config, start time.Time) {
-	// Replay the buffered body to the backend.
-	if body != nil {
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-	}
+// forward proxies a clean (or fail-open) request to the backend. The request
+// body is whatever r.Body currently is: for an inspected request buildView has
+// already rebuilt it into the full original body (inspected prefix + untouched
+// remainder), so the backend receives the complete body; for a bypass path
+// (whitelist / fail-open before inspection) it is the original stream.
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, ip string, cfg *config.Config, start time.Time) {
 	// Stash real IP (for forwarded headers) and the per-request backend target
 	// (used by rewrite for the scheme and by the Transport's DialContext).
 	ctx := context.WithValue(r.Context(), ctxSetCookie, ip)
@@ -353,25 +374,31 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		p.logBackend(req, resp.StatusCode, "backend 5xx response", nil)
 	}
 
-	needSet := true
-	if c, err := req.Cookie(cfg.Session.CookieName); err == nil {
-		if _, ok := verifySID(p.secret, c.Value); ok {
-			needSet = false // client already has a valid cookie
-		}
-	}
-	if needSet {
-		if val := newSignedSID(p.secret); val != "" {
-			secure, _ := req.Context().Value(ctxClientTLS).(bool)
-			cookie := &http.Cookie{
-				Name:     cfg.Session.CookieName,
-				Value:    val,
-				Path:     "/",
-				HttpOnly: true,
-				Secure:   secure,
-				SameSite: http.SameSiteLaxMode,
-				MaxAge:   int(cfg.Session.TTL.Std().Seconds()),
+	// Attach a signed session cookie when the client has none — unless one was
+	// already set earlier in the pipeline by ensureSession (avoids a duplicate
+	// Set-Cookie with a different id). This branch now only fires for paths that
+	// skip ensureSession, e.g. whitelisted requests.
+	if already, _ := req.Context().Value(ctxCookieSet).(bool); !already {
+		needSet := true
+		if c, err := req.Cookie(cfg.Session.CookieName); err == nil {
+			if _, ok := verifySID(p.secret, c.Value); ok {
+				needSet = false // client already has a valid cookie
 			}
-			resp.Header.Add("Set-Cookie", cookie.String())
+		}
+		if needSet {
+			if val := newSignedSID(p.secret); val != "" {
+				secure, _ := req.Context().Value(ctxClientTLS).(bool)
+				cookie := &http.Cookie{
+					Name:     cfg.Session.CookieName,
+					Value:    val,
+					Path:     "/",
+					HttpOnly: true,
+					Secure:   secure,
+					SameSite: http.SameSiteLaxMode,
+					MaxAge:   int(cfg.Session.TTL.Std().Seconds()),
+				}
+				resp.Header.Add("Set-Cookie", cookie.String())
+			}
 		}
 	}
 
@@ -426,15 +453,26 @@ func clientIPFrom(r *http.Request) string {
 	return ""
 }
 
-// buildView reads a bounded copy of the body and assembles a RequestView. The
-// body is freshly allocated (not pooled): the copy backs the reader replayed to
-// the backend, so pooling it risks corruption if the Transport is still reading
-// it when the buffer is reused.
+// buildView reads a bounded prefix of the body for inspection and assembles a
+// RequestView. Crucially it does NOT truncate the request: it rebuilds r.Body as
+// the inspected prefix followed by the untouched remainder, so the backend still
+// receives the FULL body even when it exceeds maxInspectBody (large uploads must
+// never be silently corrupted). The prefix is freshly allocated (not pooled)
+// because it backs the reader the Transport replays to the backend.
 func (p *Proxy) buildView(r *http.Request) *detect.RequestView {
 	var body []byte
 	if r.Body != nil {
 		body, _ = io.ReadAll(io.LimitReader(r.Body, maxInspectBody))
-		_ = r.Body.Close()
+		if len(body) < maxInspectBody {
+			// Whole body consumed: nothing left to stream.
+			_ = r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		} else {
+			// Body may exceed the inspection buffer: forward the prefix we read
+			// plus whatever remains, so nothing is dropped. ContentLength is left
+			// unchanged (it still describes the full original body).
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		}
 	}
 
 	headers := make(map[string]string, len(r.Header))
@@ -468,18 +506,40 @@ func (p *Proxy) buildView(r *http.Request) *detect.RequestView {
 	}
 }
 
-// sessionKey returns the id from a valid (HMAC-signed) session cookie, or an
-// IP+UA fingerprint fallback. A missing, forged or rotated cookie falls back to
-// the fingerprint — which is bound to the connection IP and therefore cannot be
-// rotated to spawn fresh sessions and evade behavioral rate limits.
-func (p *Proxy) sessionKey(r *http.Request, ip string) string {
+// ensureSession returns a stable session key for the request and, when the
+// client presents no valid session cookie, mints a signed one and sets it on the
+// response (set=true). Establishing the cookie up front — rather than only on
+// the first backend response — keeps the session identity constant across the
+// whole challenge flow, so a passed challenge and behavioral history survive
+// instead of resetting when the id switches from fingerprint to cookie.
+//
+// A valid existing cookie yields "sid:<id>". A newly minted cookie also yields
+// "sid:<id>" for the id just issued. Only if minting fails does it fall back to
+// the IP+UA fingerprint ("fp:<h>"), which is bound to the connection IP and so
+// cannot be rotated to spawn fresh sessions and evade behavioral rate limits.
+func (p *Proxy) ensureSession(w http.ResponseWriter, r *http.Request, ip string) (key string, set bool) {
 	cfg := p.cfg.Get()
 	if c, err := r.Cookie(cfg.Session.CookieName); err == nil && c.Value != "" {
 		if id, ok := verifySID(p.secret, c.Value); ok {
-			return "sid:" + id
+			return "sid:" + id, false
 		}
 	}
-	return "fp:" + sidFor(ip, r.UserAgent())
+	val := newSignedSID(p.secret)
+	dot := strings.IndexByte(val, '.')
+	if val == "" || dot <= 0 {
+		return "fp:" + sidFor(ip, r.UserAgent()), false
+	}
+	cookie := &http.Cookie{
+		Name:     cfg.Session.CookieName,
+		Value:    val,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(cfg.Session.TTL.Std().Seconds()),
+	}
+	w.Header().Add("Set-Cookie", cookie.String())
+	return "sid:" + val[:dot], true
 }
 
 // --- logging helpers ---

@@ -277,7 +277,8 @@ func fallbackPage(name string, vars map[string]string) string {
 			`<input type="hidden" name="token" value="` + htmlEscape(vars["TOKEN"]) + `">` +
 			`<input type="hidden" name="nonce" value="">` +
 			`<input type="hidden" name="bits" value="` + htmlEscape(vars["POW_BITS"]) + `">` +
-			`<input type="hidden" name="return" value="` + htmlEscape(vars["RETURN_URL"]) + `"></form>` +
+			`<input type="hidden" name="return" value="` + htmlEscape(vars["RETURN_URL"]) + `">` +
+			`<noscript><button type="submit">Continua</button></noscript></form>` +
 			traceLine(vars) +
 			`<script>` + powSolverJS + `</script>`
 	}

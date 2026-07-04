@@ -160,6 +160,34 @@ func TestEndpointRateLimitIsolatesPath(t *testing.T) {
 	}
 }
 
+func TestChallengePassed(t *testing.T) {
+	tr, err := New(1000, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "sid:visitor"
+	if tr.ChallengePassed(key) {
+		t.Error("an unseen session must not report a passed challenge")
+	}
+	tr.MarkChallengePassed(key)
+	if !tr.ChallengePassed(key) {
+		t.Error("a session marked passed must report ChallengePassed")
+	}
+	if tr.ChallengePassed("") {
+		t.Error("empty key must be false")
+	}
+
+	// Expiry: once the record ages past the TTL, the grace lapses.
+	concrete := tr.(*tracker)
+	base := time.Unix(1_700_000_000, 0)
+	concrete.now = func() time.Time { return base }
+	tr.MarkChallengePassed("sid:aging")
+	concrete.now = func() time.Time { return base.Add(31 * time.Minute) }
+	if tr.ChallengePassed("sid:aging") {
+		t.Error("challenge-passed grace must lapse after the session TTL")
+	}
+}
+
 func mustDur(t *testing.T, s string) detect.Duration {
 	t.Helper()
 	d, err := time.ParseDuration(s)

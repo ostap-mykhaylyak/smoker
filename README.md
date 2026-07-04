@@ -116,6 +116,16 @@ verification), `log-only` (observe, don't enforce), `rate-limit` (429), `ban`
 (blacklist the client IP in reputation for `block_ttl` — every later request is
 dropped fast).
 
+**Challenge grace (no loops).** Once a session solves a challenge, the proxy
+grants a grace period for that session's lifetime: `challenge` actions are
+skipped for it, so a `challenge` rule matching normal navigation can never trap
+a verified visitor in a challenge→pass→challenge loop (regardless of how the
+rule is written). `block`/`ban`/`rate-limit` still enforce. The signed session
+cookie is issued on the challenge page itself, so the session identity is stable
+across the whole flow (it does not switch from an IP+UA fingerprint to a cookie
+mid-visit, which would otherwise reset behavioral history). The challenge page
+also carries a `<noscript>` fallback so it is not a dead end without JS.
+
 **`session-matchers` check types** (evaluated by the Session/Behavior Tracker):
 `session-seen-before`, `min-prior-pageviews` (value/window), `rate-limit`
 (value/window, all endpoints for the session), `endpoint-rate-limit`

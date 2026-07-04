@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,10 +35,25 @@ http:
           - "(?i)union\\s+select"
 `
 
+// gateChallenge is a stateless challenge rule used to reproduce the challenge
+// loop: it matches a normal navigable path, so without a post-challenge grace a
+// verified visitor would be re-challenged forever.
+const gateChallenge = `
+id: itest-gate
+info:
+  severity: low
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/gate"
+action: challenge
+`
+
 type testEnv struct {
 	px      *Proxy
 	backend *httptest.Server
 	rep     *reputation.Manager
+	tracker session.Tracker
 	dir     string // config + log dir (read backend.log/access.log here)
 }
 
@@ -50,6 +66,13 @@ func setup(t *testing.T, extra ...string) *testEnv {
 		if r.URL.Path == "/boom" {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, "boom")
+			return
+		}
+		// /echo-len reports how many body bytes actually reached the backend, so
+		// a test can prove large bodies are forwarded whole (never truncated).
+		if r.URL.Path == "/echo-len" {
+			n, _ := io.Copy(io.Discard, r.Body)
+			fmt.Fprintf(w, "len=%d", n)
 			return
 		}
 		fmt.Fprintf(w, "backend-ok xff=%s", r.Header.Get("X-Forwarded-For"))
@@ -109,21 +132,25 @@ logging:
 	}
 
 	engine := detect.NewEngine(tr)
-	tmpl, err := detect.ParseTemplate([]byte(sqli))
-	if err != nil {
-		t.Fatal(err)
+	var sigs []*detect.CompiledSignature
+	for _, y := range []string{sqli, gateChallenge} {
+		tmpl, err := detect.ParseTemplate([]byte(y))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, err := detect.Compile(tmpl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sigs = append(sigs, sig)
 	}
-	sig, err := detect.Compile(tmpl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.Reload([]*detect.CompiledSignature{sig})
+	engine.Reload(sigs)
 
 	cl := &cleaner{rep: rep, tr: tr}
 	ch := challenge.New(cfg.Challenge.AssetsDir, cfg.Challenge.Secret, cfg.Challenge.TTL.Std(), 0, nil, cl)
 
 	px := New(Deps{Config: cfgMgr, Engine: engine, Rep: rep, Tracker: tr, Challenge: ch, Logs: logs})
-	return &testEnv{px: px, backend: backend, rep: rep, dir: dir}
+	return &testEnv{px: px, backend: backend, rep: rep, tracker: tr, dir: dir}
 }
 
 type cleaner struct {
@@ -328,5 +355,73 @@ func TestBackendUnreachableLoggedToBackendLog(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "backend unreachable") {
 		t.Errorf("backend.log missing unreachable entry: %q", string(data))
+	}
+}
+
+// sessionCookie returns the value of the smoker session cookie the response set,
+// or "" if none.
+func sessionCookie(rr *httptest.ResponseRecorder) string {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "smoker_sid" {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+func TestChallengePassedBreaksLoop(t *testing.T) {
+	env := setup(t)
+	ip := "203.0.113.40"
+
+	// First visit to the challenge-gated path: greylisted and challenged. The
+	// response also establishes a stable session cookie.
+	rr := do(env.px, "GET", "http://shop.example/gate", ip)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first hit should be challenged (503), got %d", rr.Code)
+	}
+	cookie := sessionCookie(rr)
+	if cookie == "" {
+		t.Fatal("challenge response must set a session cookie for a stable identity")
+	}
+	id := cookie
+	if i := strings.IndexByte(cookie, '.'); i > 0 {
+		id = cookie[:i]
+	}
+
+	// Simulate the visitor solving the challenge: IP cleaned, session marked.
+	env.rep.MarkClean(ip, "test challenge passed")
+	env.tracker.MarkChallengePassed("sid:" + id)
+
+	// Re-requesting the same gated path with the same cookie must NOT re-challenge
+	// (the loop is broken) and must reach the backend.
+	rr2 := doH(env.px, "GET", "http://shop.example/gate", ip,
+		map[string]string{"Cookie": "smoker_sid=" + cookie})
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("a session that passed a challenge must not be re-challenged; got %d", rr2.Code)
+	}
+	if !strings.Contains(rr2.Body.String(), "backend-ok") {
+		t.Errorf("passed session should reach the backend, got: %q", rr2.Body.String())
+	}
+	if env.rep.Lookup(ip) != reputation.StateClean {
+		t.Error("a passed session must not be re-greylisted (challenge loop)")
+	}
+}
+
+func TestLargeBodyForwardedWhole(t *testing.T) {
+	env := setup(t)
+	// 3 MiB > maxInspectBody (1 MiB): the inspected prefix plus the remainder must
+	// still reach the backend intact — no silent truncation.
+	const size = 3 << 20
+	body := strings.Repeat("A", size)
+	req := httptest.NewRequest("POST", "http://shop.example/echo-len", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.50:1234"
+	rr := httptest.NewRecorder()
+	env.px.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	want := fmt.Sprintf("len=%d", size)
+	if !strings.Contains(rr.Body.String(), want) {
+		t.Errorf("backend received a truncated body: got %q, want %q", rr.Body.String(), want)
 	}
 }

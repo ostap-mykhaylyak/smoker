@@ -25,7 +25,15 @@
     <div class="spinner"></div>
     <p>Stiamo verificando che la tua connessione sia sicura prima di procedere.
        Sarai reindirizzato automaticamente.</p>
-    <noscript><p>Attiva JavaScript per completare la verifica.</p></noscript>
+    <noscript>
+      <p>JavaScript è disabilitato. Premi il pulsante per continuare.</p>
+      <form method="POST" action="{{VERIFY_URL}}">
+        <input type="hidden" name="token" value="{{TOKEN}}">
+        <input type="hidden" name="nonce" value="0">
+        <input type="hidden" name="return" value="{{RETURN_URL}}">
+        <button type="submit">Continua</button>
+      </form>
+    </noscript>
 
     <p class="trace">Il tuo IP: <code>{{CLIENT_IP}}</code><br>
        ID richiesta: <code>{{REQUEST_ID}}</code></p>

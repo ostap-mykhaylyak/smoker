@@ -78,6 +78,11 @@ func compressibleType(ct string) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}
+	// Server-Sent Events are a long-lived stream: compressing them buffers the
+	// pipe and delays real-time delivery, so never compress them.
+	if ct == "text/event-stream" {
+		return false
+	}
 	if strings.HasPrefix(ct, "text/") {
 		return true
 	}
