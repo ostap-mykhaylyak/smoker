@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ostap-mykhaylyak/smoker/internal/cache"
 	"github.com/ostap-mykhaylyak/smoker/internal/challenge"
 	"github.com/ostap-mykhaylyak/smoker/internal/config"
 	"github.com/ostap-mykhaylyak/smoker/internal/detect"
@@ -54,6 +56,7 @@ type testEnv struct {
 	backend *httptest.Server
 	rep     *reputation.Manager
 	tracker session.Tracker
+	imgHits *int64 // backend hits for /cacheimg.png (to prove cache serving)
 	dir     string // config + log dir (read backend.log/access.log here)
 }
 
@@ -61,6 +64,7 @@ func setup(t *testing.T, extra ...string) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 
+	var imgHits, noStoreHits int64
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /boom lets a test drive a backend-origin 5xx (recorded in backend.log).
 		if r.URL.Path == "/boom" {
@@ -73,6 +77,24 @@ func setup(t *testing.T, extra ...string) *testEnv {
 		if r.URL.Path == "/echo-len" {
 			n, _ := io.Copy(io.Discard, r.Body)
 			fmt.Fprintf(w, "len=%d", n)
+			return
+		}
+		// /cacheimg.png counts backend hits so a test can prove a cached response
+		// is served without re-hitting the backend. The count is baked into the
+		// body, so a cache HIT keeps returning the first-fetch value.
+		if r.URL.Path == "/cacheimg.png" {
+			n := atomic.AddInt64(&imgHits, 1)
+			w.Header().Set("Content-Type", "image/png")
+			fmt.Fprintf(w, "IMG-%d", n)
+			return
+		}
+		// /nostore.png is a cacheable extension but forbids caching via
+		// Cache-Control; each call must reach the backend (distinct body).
+		if r.URL.Path == "/nostore.png" {
+			n := atomic.AddInt64(&noStoreHits, 1)
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "no-store")
+			fmt.Fprintf(w, "NS-%d", n)
 			return
 		}
 		fmt.Fprintf(w, "backend-ok xff=%s", r.Header.Get("X-Forwarded-For"))
@@ -149,8 +171,13 @@ logging:
 	cl := &cleaner{rep: rep, tr: tr}
 	ch := challenge.New(cfg.Challenge.AssetsDir, cfg.Challenge.Secret, cfg.Challenge.TTL.Std(), 0, nil, cl)
 
-	px := New(Deps{Config: cfgMgr, Engine: engine, Rep: rep, Tracker: tr, Challenge: ch, Logs: logs})
-	return &testEnv{px: px, backend: backend, rep: rep, tracker: tr, dir: dir}
+	cc, err := cache.New(cfg.Cache.MaxEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	px := New(Deps{Config: cfgMgr, Engine: engine, Rep: rep, Tracker: tr, Challenge: ch, Logs: logs, Cache: cc})
+	return &testEnv{px: px, backend: backend, rep: rep, tracker: tr, imgHits: &imgHits, dir: dir}
 }
 
 type cleaner struct {
@@ -462,5 +489,59 @@ func TestBufferedRequestIsRewindable(t *testing.T) {
 	b, _ := io.ReadAll(rc)
 	if string(b) != "hello" {
 		t.Errorf("GetBody replay = %q, want hello", b)
+	}
+}
+
+func TestContentCacheServesFromCache(t *testing.T) {
+	env := setup(t, "cache:\n  enabled: true\n  ttl: \"1h\"")
+
+	// First request: MISS, fetched from the backend and stored.
+	rr1 := do(env.px, "GET", "http://shop.example/cacheimg.png", "203.0.113.60")
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rr1.Code)
+	}
+	if got := rr1.Header().Get("X-Cache"); got != "MISS" {
+		t.Errorf("first X-Cache = %q, want MISS", got)
+	}
+	if rr1.Body.String() != "IMG-1" {
+		t.Fatalf("first body = %q, want IMG-1", rr1.Body.String())
+	}
+
+	// Second request: HIT, served from cache without touching the backend.
+	rr2 := do(env.px, "GET", "http://shop.example/cacheimg.png", "203.0.113.61")
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rr2.Code)
+	}
+	if got := rr2.Header().Get("X-Cache"); got != "HIT" {
+		t.Errorf("second X-Cache = %q, want HIT", got)
+	}
+	if rr2.Body.String() != "IMG-1" {
+		t.Errorf("second body = %q, want cached IMG-1", rr2.Body.String())
+	}
+	if n := atomic.LoadInt64(env.imgHits); n != 1 {
+		t.Errorf("backend was hit %d times, want 1 (second served from cache)", n)
+	}
+}
+
+func TestContentCacheRespectsNoStore(t *testing.T) {
+	env := setup(t, "cache:\n  enabled: true\n  ttl: \"1h\"")
+	rr1 := do(env.px, "GET", "http://shop.example/nostore.png", "203.0.113.62")
+	rr2 := do(env.px, "GET", "http://shop.example/nostore.png", "203.0.113.62")
+	// A no-store response must never be cached: each call reaches the backend and
+	// gets a fresh (different) body.
+	if rr1.Body.String() == rr2.Body.String() {
+		t.Errorf("no-store response was cached: both bodies = %q", rr1.Body.String())
+	}
+	if got := rr2.Header().Get("X-Cache"); got == "HIT" {
+		t.Errorf("no-store response must not be a cache HIT")
+	}
+}
+
+func TestNonCacheablePathNotCached(t *testing.T) {
+	env := setup(t, "cache:\n  enabled: true\n  ttl: \"1h\"")
+	// A dynamic path (no cacheable extension) must not be cached or tagged.
+	rr := do(env.px, "GET", "http://shop.example/api/data", "203.0.113.63")
+	if got := rr.Header().Get("X-Cache"); got != "" {
+		t.Errorf("non-cacheable path must have no X-Cache header, got %q", got)
 	}
 }

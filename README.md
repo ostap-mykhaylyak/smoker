@@ -220,7 +220,7 @@ them, refreshed on `sync_interval`).
 
 | File             | Contents                                                        |
 |------------------|-----------------------------------------------------------------|
-| `access.log`     | every request forwarded to the backend: **req_id**, ip, method, host, path, query, **status** (200/301/404/…), bytes, ua, duration |
+| `access.log`     | every request forwarded to the backend: **req_id**, ip, method, host, path, query, **status** (200/301/404/…), bytes, ua, **cache** (HIT/MISS/empty), duration |
 | `blocked.log`    | every blocked/challenged request: **req_id**, ip, path/method, **status**, template-id, severity, action, reason |
 | `backend.log`    | backend errors only: **req_id**, ip, method, host, path, **status** (5xx), reason, err — both backend `5xx` responses and unreachable/transport failures (502) |
 | `reputation.log` | IP state transitions (clean ⇄ greylisted ⇄ blocked)             |
@@ -377,6 +377,42 @@ on `0.0.0.0`), not only on `127.0.0.1:443`. With the redirect active, external
 smoker dies, the redirect is dropped and clients reach nginx's public `:443`
 directly. If nginx binds only loopback on 443, fail-open covers plaintext `:80`
 but not HTTPS.
+
+## Content cache (CDN-style)
+
+smoker can cache backend responses and serve them itself, so repeated requests
+for the same static asset (images, fonts, CSS/JS) never reach the backend until
+the cached copy expires — an in-process CDN. Opt-in in `config.yaml`:
+
+```yaml
+cache:
+  enabled: true
+  ttl: "1h"                 # how long a cached object is served before refetch
+  extensions: [".jpg", ".png", ".webp", ".svg", ".ico", ".css", ".js"]
+  max_object_size: 10485760 # 10 MiB — skip caching a single response larger than this
+  max_entries: 4096         # LRU capacity (objects); changing it needs a restart
+```
+
+- **What is cached:** a `GET` (no `Range`) whose path ends in one of
+  `extensions` (leading dot optional, case-insensitive), when the backend
+  response is safe to store — status `200`, no `Set-Cookie`, no
+  `Cache-Control: no-store|private|no-cache`, no content-varying `Vary`, and
+  within `max_object_size`. Everything else streams through uncached.
+- **Where it lives:** an in-memory LRU (bounded by `max_entries` and
+  `max_object_size`, so worst-case memory ≈ their product). Nothing is written
+  to disk. A restart empties it.
+- **Correctness:** each object keys on `method + host + request-URI`, so vhosts
+  and query strings are cached separately; expired entries are never served. The
+  cache sits **after** the security pipeline — reputation, access lists and the
+  detection engine still run on every request, cached or not. Cached objects are
+  served raw (not additionally zstd-compressed); the per-client session cookie is
+  still issued on cache hits.
+- **Observability:** responses carry `X-Cache: HIT` or `MISS` (and an `Age`
+  header on hits), and `access.log` gains a `cache` field. Tune the TTL by watching
+  hit rates: `jq -r 'select(.cache=="HIT") | .path' /var/log/smoker/access.log | sort | uniq -c | sort -rn | head`.
+
+`enabled`, `ttl`, `extensions` and `max_object_size` are hot-reloadable; only
+`max_entries` (the LRU capacity) is fixed at startup.
 
 ## Performance: HTTP/3 and compression
 

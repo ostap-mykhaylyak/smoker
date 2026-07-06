@@ -69,6 +69,19 @@ compression:
   zstd: false              # compress compressible backend responses with zstd for clients that support it
   min_size: 1024           # skip responses smaller than this (bytes)
 
+# CDN-style content cache. When enabled, GET responses whose path ends in one of
+# `extensions` are stored in memory for `ttl` and served directly by smoker
+# (no backend round-trip) until they expire. Only safe responses are cached
+# (200, no Set-Cookie, no no-store/private Cache-Control). Responses carry an
+# X-Cache: HIT/MISS header and access.log gains a `cache` field.
+cache:
+  enabled: false
+  ttl: "1h"
+  # Match by URL path suffix (leading dot optional, case-insensitive).
+  extensions: [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".css", ".js", ".mp4", ".webm"]
+  max_object_size: 10485760   # 10 MiB: skip caching a single response larger than this
+  max_entries: 4096           # LRU capacity (number of objects); changing it needs a restart
+
 # IP/CIDR access lists. Each `git` repo is overlaid onto its `dir` on its OWN
 # `sync_interval` (same-name files overwritten, local *.ips kept); every *.ips
 # file under `dir` is merged (plus optional inline `ips`). git.url: "" disables

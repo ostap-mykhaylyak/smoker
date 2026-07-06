@@ -22,6 +22,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/ostap-mykhaylyak/smoker/internal/bootstrap"
+	"github.com/ostap-mykhaylyak/smoker/internal/cache"
 	"github.com/ostap-mykhaylyak/smoker/internal/challenge"
 	"github.com/ostap-mykhaylyak/smoker/internal/config"
 	"github.com/ostap-mykhaylyak/smoker/internal/detect"
@@ -212,6 +213,17 @@ func run(cfgPath string, noFirewall bool) error {
 	cleaner := &cleanerAdapter{rep: rep, tracker: tracker}
 	chMgr := challenge.New(cfg.Challenge.AssetsDir, secret, cfg.Challenge.TTL.Std(), cfg.Challenge.POWBits, logs.Blocked, cleaner)
 
+	// --- Content cache (CDN-style) ---
+	// Always built (enable/disable and TTL/extensions are hot-reloadable); only
+	// the LRU capacity is fixed at startup.
+	contentCache, err := cache.New(cfg.Cache.MaxEntries)
+	if err != nil {
+		return fmt.Errorf("cache: %w", err)
+	}
+	logs.Service.Info("content cache ready",
+		"enabled", cfg.Cache.Enabled, "ttl", cfg.Cache.TTL.Std().String(),
+		"max_entries", cfg.Cache.MaxEntries, "extensions", len(cfg.Cache.Extensions))
+
 	// --- Proxy core ---
 	px := proxy.New(proxy.Deps{
 		Config:    cfgMgr,
@@ -220,6 +232,7 @@ func run(cfgPath string, noFirewall bool) error {
 		Tracker:   tracker,
 		Challenge: chMgr,
 		Logs:      logs,
+		Cache:     contentCache,
 		Secret:    secret,
 	})
 

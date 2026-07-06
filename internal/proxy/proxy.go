@@ -26,9 +26,11 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ostap-mykhaylyak/smoker/internal/cache"
 	"github.com/ostap-mykhaylyak/smoker/internal/challenge"
 	"github.com/ostap-mykhaylyak/smoker/internal/config"
 	"github.com/ostap-mykhaylyak/smoker/internal/detect"
@@ -53,6 +55,8 @@ const (
 	ctxClientTLS  // bool: was the inbound client connection TLS?
 	ctxReqID      // string: per-request id shown to the visitor and logged
 	ctxCookieSet  // bool: the session cookie was already set earlier in the pipeline
+	ctxCacheStore // string: cache key to store this (cache-miss) response under
+	ctxCacheState // string: "HIT" | "MISS" for access.log
 )
 
 // backendTarget is the per-request upstream chosen from the inbound listener:
@@ -80,7 +84,8 @@ type Proxy struct {
 	tracker   session.Tracker
 	challenge *challenge.Manager
 	logs      *logging.Loggers
-	secret    []byte // HMAC key for signing the session cookie
+	cache     *cache.Cache // optional CDN-style content cache (nil = disabled)
+	secret    []byte       // HMAC key for signing the session cookie
 
 	rp *httputil.ReverseProxy
 }
@@ -93,6 +98,8 @@ type Deps struct {
 	Tracker   session.Tracker
 	Challenge *challenge.Manager
 	Logs      *logging.Loggers
+	// Cache is the optional content cache. nil disables caching entirely.
+	Cache *cache.Cache
 	// Secret signs the session cookie so it cannot be forged/rotated to evade
 	// behavioral rate limits.
 	Secret string
@@ -107,6 +114,7 @@ func New(d Deps) *Proxy {
 		tracker:   d.Tracker,
 		challenge: d.Challenge,
 		logs:      d.Logs,
+		cache:     d.Cache,
 		secret:    []byte(d.Secret),
 	}
 
@@ -254,11 +262,50 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (6) Clean passthrough.
+	// (6) Clean passthrough — served from the content cache when possible.
+	if p.cacheable(r, cfg) {
+		key := cacheKey(r)
+		if e, ok := p.cache.Get(key); ok {
+			p.serveCacheHit(w, r, clientIP, e, start)
+			p.tracker.Record(sessionKey, view)
+			return
+		}
+		// Miss: tag the request so modifyResponse stores the backend response, and
+		// record the miss for access.log.
+		ctx := context.WithValue(r.Context(), ctxCacheStore, key)
+		ctx = context.WithValue(ctx, ctxCacheState, "MISS")
+		r = r.WithContext(ctx)
+	}
 	p.forward(w, r, clientIP, cfg, start)
 	// Record the clean pageview for behavioral tracking (post-decision so a
 	// cold request has no self-generated prior pageview).
 	p.tracker.Record(sessionKey, view)
+}
+
+// cacheable reports whether a request is eligible for the content cache: caching
+// on, a GET without a Range, and a path extension in the configured set.
+func (p *Proxy) cacheable(r *http.Request, cfg *config.Config) bool {
+	return p.cache != nil &&
+		r.Method == http.MethodGet &&
+		r.Header.Get("Range") == "" &&
+		cfg.CacheableExt(r.URL.Path)
+}
+
+// serveCacheHit writes a cached response directly to the client, bypassing the
+// backend entirely.
+func (p *Proxy) serveCacheHit(w http.ResponseWriter, r *http.Request, ip string, e *cache.Entry, start time.Time) {
+	h := w.Header()
+	for k, vv := range e.Header {
+		h[k] = vv
+	}
+	h.Set("X-Cache", "HIT")
+	h.Set("Age", strconv.Itoa(p.cache.Age(e)))
+	w.WriteHeader(e.Status)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(e.Body)
+	}
+	r = r.WithContext(context.WithValue(r.Context(), ctxCacheState, "HIT"))
+	p.logAccess(ip, r, e.Status, int64(len(e.Body)), time.Since(start))
 }
 
 func (p *Proxy) applyAction(w http.ResponseWriter, r *http.Request, ip, sessionKey string, dec detect.Decision, cfg *config.Config, view *detect.RequestView, start time.Time) {
@@ -402,8 +449,31 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		}
 	}
 
-	// Optional zstd response compression for clients that advertise it.
-	if cfg.Compression.Zstd && shouldCompress(req, resp, cfg.Compression.MinSize) {
+	// Content cache: if this was a cacheable miss and the response is safe to
+	// store, tee the body into the cache as it streams to the client (committed
+	// on a clean EOF). A stored response is served raw, so it is NOT also
+	// zstd-compressed here.
+	stored := false
+	if key, ok := req.Context().Value(ctxCacheStore).(string); ok && key != "" && p.cache != nil {
+		if storable(resp, cfg.Cache.MaxObjectSize) {
+			resp.Body = &cachingBody{
+				src:     resp.Body,
+				buf:     new(bytes.Buffer),
+				key:     key,
+				status:  resp.StatusCode,
+				header:  cacheHeaders(resp.Header),
+				maxSize: cfg.Cache.MaxObjectSize,
+				ttl:     cfg.Cache.TTL.Std(),
+				cache:   p.cache,
+			}
+			resp.Header.Set("X-Cache", "MISS")
+			stored = true
+		}
+	}
+
+	// Optional zstd response compression for clients that advertise it (skipped
+	// when we are caching this response raw).
+	if !stored && cfg.Compression.Zstd && shouldCompress(req, resp, cfg.Compression.MinSize) {
 		resp.Body = zstdReader(resp.Body)
 		resp.Header.Set("Content-Encoding", "zstd")
 		resp.Header.Del("Content-Length")
@@ -412,6 +482,88 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	}
 	return nil
 }
+
+// storable reports whether a backend response may be cached: a 200 with no
+// per-user Set-Cookie, no no-store/private/no-cache directive, no content-varying
+// Vary, and (if the length is known) within the size cap.
+func storable(resp *http.Response, maxSize int) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	if resp.Header.Get("Set-Cookie") != "" {
+		return false
+	}
+	cc := strings.ToLower(resp.Header.Get("Cache-Control"))
+	if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") || strings.Contains(cc, "no-cache") {
+		return false
+	}
+	if v := strings.TrimSpace(resp.Header.Get("Vary")); v != "" && !strings.EqualFold(v, "accept-encoding") {
+		return false
+	}
+	if maxSize > 0 && resp.ContentLength > int64(maxSize) {
+		return false
+	}
+	return true
+}
+
+// cacheHeaders clones the response headers for storage, dropping hop-by-hop and
+// per-request headers that must not be replayed from cache.
+func cacheHeaders(h http.Header) http.Header {
+	out := h.Clone()
+	for _, k := range []string{
+		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Set-Cookie", "X-Cache", "Age",
+	} {
+		out.Del(k)
+	}
+	return out
+}
+
+// cachingBody tees the backend body into a buffer while it streams to the client
+// and, on a clean EOF within the size cap, commits the complete object to the
+// cache. A client disconnect (Close before EOF) or an over-size body leaves
+// nothing cached, so only whole, successfully delivered responses are stored.
+type cachingBody struct {
+	src     io.ReadCloser
+	buf     *bytes.Buffer
+	key     string
+	status  int
+	header  http.Header
+	maxSize int
+	ttl     time.Duration
+	cache   *cache.Cache
+
+	tooBig    bool
+	committed bool
+}
+
+func (b *cachingBody) Read(p []byte) (int, error) {
+	n, err := b.src.Read(p)
+	if n > 0 && !b.tooBig {
+		if b.maxSize > 0 && b.buf.Len()+n > b.maxSize {
+			b.tooBig = true // give up: object exceeds the cap
+			b.buf.Reset()
+		} else {
+			b.buf.Write(p[:n])
+		}
+	}
+	if err == io.EOF && !b.tooBig && !b.committed {
+		b.committed = true
+		now := b.cache.Now()
+		body := make([]byte, b.buf.Len())
+		copy(body, b.buf.Bytes())
+		b.cache.Put(b.key, &cache.Entry{
+			Status:  b.status,
+			Header:  b.header,
+			Body:    body,
+			Stored:  now,
+			Expires: now.Add(b.ttl),
+		})
+	}
+	return n, err
+}
+
+func (b *cachingBody) Close() error { return b.src.Close() }
 
 func (p *Proxy) backendError(w http.ResponseWriter, r *http.Request, err error) {
 	// The client went away before the backend responded (request context
@@ -558,6 +710,7 @@ func (p *Proxy) ensureSession(w http.ResponseWriter, r *http.Request, ip string)
 // --- logging helpers ---
 
 func (p *Proxy) logAccess(ip string, r *http.Request, status int, bytes int64, dur time.Duration) {
+	cacheState, _ := r.Context().Value(ctxCacheState).(string)
 	p.logs.Access.Info("request",
 		slog.String("req_id", reqIDFrom(r)),
 		slog.String("ip", ip),
@@ -568,8 +721,15 @@ func (p *Proxy) logAccess(ip string, r *http.Request, status int, bytes int64, d
 		slog.Int("status", status),
 		slog.Int64("bytes", bytes),
 		slog.String("ua", r.UserAgent()),
+		slog.String("cache", cacheState),
 		slog.Int64("dur_us", dur.Microseconds()),
 	)
+}
+
+// cacheKey identifies a cached object by method + host + full request URI, so
+// different vhosts and query strings are cached separately.
+func cacheKey(r *http.Request) string {
+	return r.Method + " " + r.Host + " " + r.URL.RequestURI()
 }
 
 func (p *Proxy) logBlocked(ip string, r *http.Request, templateID, reason, action, severity string, status int) {

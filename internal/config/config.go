@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -143,6 +144,26 @@ type Config struct {
 		MinSize int  `yaml:"min_size"` // skip responses smaller than this (bytes)
 	} `yaml:"compression"`
 
+	// Cache is smoker's CDN-style content cache. When enabled, GET responses for
+	// paths whose extension is in Extensions are stored for TTL and served
+	// directly from smoker (no backend round-trip) until they expire.
+	Cache struct {
+		Enabled bool `yaml:"enabled"`
+		// TTL is how long a cached object is served before it is refetched.
+		TTL Duration `yaml:"ttl"`
+		// Extensions selects what to cache by URL path suffix, e.g.
+		// [".jpg", ".png", ".webp"]. A leading dot is optional; matching is
+		// case-insensitive. Empty means nothing is cached.
+		Extensions []string `yaml:"extensions"`
+		// MaxObjectSize skips caching a single response larger than this (bytes),
+		// so one big file cannot blow up memory. <= 0 disables the per-object cap
+		// (not recommended). The default is 10 MiB.
+		MaxObjectSize int `yaml:"max_object_size"`
+		// MaxEntries is the LRU capacity (number of cached objects). Changing it
+		// takes effect on restart.
+		MaxEntries int `yaml:"max_entries"`
+	} `yaml:"cache"`
+
 	// Whitelist IPs/CIDRs bypass ALL filtering (reputation, detection,
 	// challenge) and are forwarded straight to the backend. Blocklist IPs/CIDRs
 	// are always denied, before any inspection. Each list merges: a static File,
@@ -169,6 +190,9 @@ type Config struct {
 	blocklistNets    []netip.Prefix
 	trustedProxyNets []netip.Prefix
 	accessWarns      []string // entries skipped as invalid (for logging)
+
+	// Normalized cache extension set (populated by Load; lowercased, dot-prefixed).
+	cacheExts map[string]struct{}
 }
 
 // AccessListWarnings returns entries that were skipped as invalid IPs/CIDRs
@@ -226,6 +250,32 @@ func (c *Config) Blocklisted(ip string) bool { return matchAny(c.blocklistNets, 
 // ignored (smoker is the edge).
 func (c *Config) TrustedProxy(ip string) bool { return matchAny(c.trustedProxyNets, ip) }
 
+// compileCache normalizes the configured cache extensions into a lookup set
+// (lowercased, each with a leading dot).
+func (c *Config) compileCache() {
+	c.cacheExts = make(map[string]struct{}, len(c.Cache.Extensions))
+	for _, e := range c.Cache.Extensions {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		c.cacheExts[e] = struct{}{}
+	}
+}
+
+// CacheableExt reports whether urlPath's extension is in the configured cache
+// set (and caching is enabled). Query strings must be stripped by the caller.
+func (c *Config) CacheableExt(urlPath string) bool {
+	if !c.Cache.Enabled || len(c.cacheExts) == 0 {
+		return false
+	}
+	_, ok := c.cacheExts[strings.ToLower(path.Ext(urlPath))]
+	return ok
+}
+
 func matchAny(nets []netip.Prefix, ip string) bool {
 	if len(nets) == 0 {
 		return false
@@ -277,6 +327,14 @@ func Default() *Config {
 	c.Session.TTL = Duration(30 * time.Minute)
 	c.Session.MaxEntries = 100000
 	c.Compression.MinSize = 1024
+	c.Cache.Enabled = false
+	c.Cache.TTL = Duration(1 * time.Hour)
+	c.Cache.Extensions = []string{
+		".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".ico",
+		".woff", ".woff2", ".ttf", ".otf", ".css", ".js", ".mp4", ".webm",
+	}
+	c.Cache.MaxObjectSize = 10 << 20 // 10 MiB
+	c.Cache.MaxEntries = 4096
 	c.Whitelist.Dir = paths.WhitelistDir
 	c.Whitelist.SyncInterval = Duration(1 * time.Hour)
 	c.Whitelist.Git.URL = "https://codeberg.org/ostap-mykhaylyak/whitelist"
@@ -316,6 +374,7 @@ func Load(path string) (*Config, error) {
 	if err := c.compileAccessLists(); err != nil {
 		return nil, err
 	}
+	c.compileCache()
 	return c, nil
 }
 
