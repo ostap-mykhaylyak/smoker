@@ -64,7 +64,7 @@ func Ensure(cfgPath string) ([]string, error) {
 		{paths.WhitelistDir, 0o755}, // git-synced access-list repos
 		{paths.BlocklistDir, 0o755},
 		{paths.TrustedProxiesDir, 0o755}, // trusted front-proxy IPs (e.g. Cloudflare)
-		{paths.LogDir, 0o750}, // runtime state + logs (writable at runtime)
+		{paths.LogDir, 0o750},            // runtime state + logs (writable at runtime)
 		{paths.AssetsDir, 0o755},
 	}
 	for _, d := range dirs {

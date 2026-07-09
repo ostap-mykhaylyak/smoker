@@ -39,10 +39,10 @@ func TestSafeReturnBlocksOpenRedirect(t *testing.T) {
 		"/dashboard":        "/dashboard",
 		"/a/b?c=d":          "/a/b?c=d",
 		"":                  "/",
-		"//evil.com":        "/",          // protocol-relative
-		"/\\evil.com":       "/",          // backslash variant
-		"https://evil.com":  "/",          // absolute
-		"javascript:alert1": "/",          // not path-rooted
+		"//evil.com":        "/", // protocol-relative
+		"/\\evil.com":       "/", // backslash variant
+		"https://evil.com":  "/", // absolute
+		"javascript:alert1": "/", // not path-rooted
 		"/":                 "/",
 	}
 	for in, want := range cases {

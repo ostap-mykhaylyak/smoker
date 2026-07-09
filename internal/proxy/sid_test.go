@@ -23,11 +23,11 @@ func TestSignedSIDRejectsForgery(t *testing.T) {
 	v := newSignedSID(secret)
 
 	forged := []string{
-		"randomattackervalue",   // no separator
-		"abc.def",               // bad mac
-		"abc.",                  // empty mac
-		".def",                  // empty id
-		v + "x",                 // tampered mac
+		"randomattackervalue", // no separator
+		"abc.def",             // bad mac
+		"abc.",                // empty mac
+		".def",                // empty id
+		v + "x",               // tampered mac
 	}
 	for _, f := range forged {
 		if _, ok := verifySID(secret, f); ok {

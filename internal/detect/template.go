@@ -82,18 +82,18 @@ type Info struct {
 	Tags        Strings  `yaml:"tags"`
 	// Classification carries CVE ids etc. when present.
 	Classification struct {
-		CVEID   Strings `yaml:"cve-id"`
-		CWEID   Strings `yaml:"cwe-id"`
+		CVEID     Strings `yaml:"cve-id"`
+		CWEID     Strings `yaml:"cwe-id"`
 		CVSSScore float64 `yaml:"cvss-score"`
 	} `yaml:"classification"`
 }
 
 // HTTP is a single Nuclei http request block (subset relevant to signatures).
 type HTTP struct {
-	Method  string   `yaml:"method"`
-	Path    Strings  `yaml:"path"`
-	Raw     []string `yaml:"raw"`
-	Body    string   `yaml:"body"`
+	Method  string            `yaml:"method"`
+	Path    Strings           `yaml:"path"`
+	Raw     []string          `yaml:"raw"`
+	Body    string            `yaml:"body"`
 	Headers map[string]string `yaml:"headers"`
 
 	MatchersCondition string    `yaml:"matchers-condition"` // "and" | "or"
@@ -111,12 +111,12 @@ type HTTP struct {
 // evaluates matchers against the INCOMING request (path/query/header/body),
 // never against a backend response.
 type Matcher struct {
-	Type      string   `yaml:"type"` // word | regex | status(ignored) | dsl(subset)
-	Part      string   `yaml:"part"` // request | path | header | body | all
-	Words     Strings  `yaml:"words"`
-	Regex     Strings  `yaml:"regex"`
-	Condition string   `yaml:"condition"` // "and" | "or" (within a matcher)
-	Negative  bool     `yaml:"negative"`
+	Type      string  `yaml:"type"` // word | regex | status(ignored) | dsl(subset)
+	Part      string  `yaml:"part"` // request | path | header | body | all
+	Words     Strings `yaml:"words"`
+	Regex     Strings `yaml:"regex"`
+	Condition string  `yaml:"condition"` // "and" | "or" (within a matcher)
+	Negative  bool    `yaml:"negative"`
 	// CaseInsensitive applies to `word` matchers.
 	CaseInsensitive bool `yaml:"case-insensitive"`
 }
@@ -124,8 +124,8 @@ type Matcher struct {
 // SessionMatchers is smoker's stateful extension, evaluated by the
 // Session/Behavior Tracker. Absent block == "no behavioral condition".
 type SessionMatchers struct {
-	Condition string          `yaml:"condition"` // "and" | "or"
-	Checks    []SessionCheck  `yaml:"checks"`
+	Condition string         `yaml:"condition"` // "and" | "or"
+	Checks    []SessionCheck `yaml:"checks"`
 }
 
 // SessionCheck is one behavioral predicate.

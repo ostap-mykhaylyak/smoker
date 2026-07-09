@@ -25,8 +25,8 @@ import (
 // CertStore holds the SNI -> certificate map and answers GetCertificate. It is
 // safe for concurrent use and swappable on hot-reload.
 type CertStore struct {
-	mu      sync.RWMutex
-	byName  map[string]*tls.Certificate
+	mu       sync.RWMutex
+	byName   map[string]*tls.Certificate
 	fallback func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 }
 

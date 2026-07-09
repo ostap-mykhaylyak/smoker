@@ -11,14 +11,14 @@ import (
 // is bounded) and reused across all signatures to avoid re-parsing in the hot
 // path.
 type RequestView struct {
-	Method   string
-	Path     string            // decoded path, no query
-	PathNorm string            // normalized path (collapsed //, resolved ./..)
-	RawQuery string            // raw query string
-	FullURI  string            // path + "?" + decoded query
-	FullURINorm string         // PathNorm + "?" + decoded query
-	Headers  map[string]string // canonicalized keys, joined values
-	Body     []byte            // bounded copy of request body
+	Method      string
+	Path        string            // decoded path, no query
+	PathNorm    string            // normalized path (collapsed //, resolved ./..)
+	RawQuery    string            // raw query string
+	FullURI     string            // path + "?" + decoded query
+	FullURINorm string            // PathNorm + "?" + decoded query
+	Headers     map[string]string // canonicalized keys, joined values
+	Body        []byte            // bounded copy of request body
 }
 
 // NormalizePath canonicalizes a request path to defeat common WAF evasions:
@@ -69,12 +69,12 @@ type pathMatcher struct {
 }
 
 type compiledMatcher struct {
-	part      string // request | path | header | body | all
-	words     []string
-	res       []*regexp.Regexp
-	condAnd   bool // within-matcher AND across words/regex
-	negative  bool
-	caseFold  bool
+	part     string // request | path | header | body | all
+	words    []string
+	res      []*regexp.Regexp
+	condAnd  bool // within-matcher AND across words/regex
+	negative bool
+	caseFold bool
 }
 
 // Compile turns a parsed Template into a CompiledSignature. Errors are returned
