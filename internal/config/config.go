@@ -144,6 +144,37 @@ type Config struct {
 		MinSize int  `yaml:"min_size"` // skip responses smaller than this (bytes)
 	} `yaml:"compression"`
 
+	// Protection is smoker's PROACTIVE, rule-free defense layer: a per-IP flood
+	// governor and a request-anomaly scorer that act generically (no per-attack
+	// template needed), in the spirit of a commercial WAF's automatic mitigation.
+	Protection struct {
+		Enabled bool `yaml:"enabled"`
+
+		// RateLimit is a per-IP token-bucket flood governor. Sensitive paths cost
+		// SensitiveWeight tokens each so abuse-prone endpoints trip sooner.
+		RateLimit struct {
+			Enabled         bool     `yaml:"enabled"`
+			Window          Duration `yaml:"window"`
+			Burst           int      `yaml:"burst"`            // max weighted requests per window per IP
+			SensitiveWeight int      `yaml:"sensitive_weight"` // token cost of a sensitive-path hit
+			SensitivePaths  []string `yaml:"sensitive_paths"`  // path prefixes counted at SensitiveWeight
+			Action          string   `yaml:"action"`           // rate-limit | challenge | ban | block | log-only
+			ResponseCode    int      `yaml:"response_code"`
+		} `yaml:"rate_limit"`
+
+		// Anomaly scores each request on generic bot/scanner signals; over
+		// Threshold the Action fires.
+		Anomaly struct {
+			Enabled      bool   `yaml:"enabled"`
+			Threshold    int    `yaml:"threshold"`
+			Action       string `yaml:"action"` // challenge | block | rate-limit | ban | log-only
+			ResponseCode int    `yaml:"response_code"`
+		} `yaml:"anomaly"`
+
+		// MaxTrackedIPs bounds the governor's per-IP state (LRU). Restart to change.
+		MaxTrackedIPs int `yaml:"max_tracked_ips"`
+	} `yaml:"protection"`
+
 	// Cache is smoker's CDN-style content cache. When enabled, GET responses for
 	// paths whose extension is in Extensions are stored for TTL and served
 	// directly from smoker (no backend round-trip) until they expire.
@@ -327,6 +358,22 @@ func Default() *Config {
 	c.Session.TTL = Duration(30 * time.Minute)
 	c.Session.MaxEntries = 100000
 	c.Compression.MinSize = 1024
+	// Proactive protection: opt-in, but pre-tuned so enabling it "just works".
+	c.Protection.Enabled = false
+	c.Protection.RateLimit.Enabled = true
+	c.Protection.RateLimit.Window = Duration(1 * time.Minute)
+	c.Protection.RateLimit.Burst = 300
+	c.Protection.RateLimit.SensitiveWeight = 20
+	c.Protection.RateLimit.SensitivePaths = []string{
+		"/xmlrpc.php", "/wp-login.php", "/wp-cron.php", "/wp-comments-post.php",
+	}
+	c.Protection.RateLimit.Action = "rate-limit"
+	c.Protection.RateLimit.ResponseCode = 429
+	c.Protection.Anomaly.Enabled = true
+	c.Protection.Anomaly.Threshold = 100
+	c.Protection.Anomaly.Action = "challenge"
+	c.Protection.Anomaly.ResponseCode = 403
+	c.Protection.MaxTrackedIPs = 65536
 	c.Cache.Enabled = false
 	c.Cache.TTL = Duration(1 * time.Hour)
 	c.Cache.Extensions = []string{

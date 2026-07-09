@@ -69,6 +69,34 @@ compression:
   zstd: false              # compress compressible backend responses with zstd for clients that support it
   min_size: 1024           # skip responses smaller than this (bytes)
 
+# Proactive protection (rule-free). Generic defenses that work WITHOUT writing a
+# template per attack, like a commercial WAF's automatic bot/flood mitigation.
+# Opt-in but pre-tuned. Start with the anomaly action as "log-only" to observe in
+# blocked.log, then promote to "challenge".
+protection:
+  enabled: false
+  # Per-IP flood governor (token bucket). Sensitive paths cost more, so
+  # abuse-prone endpoints (xmlrpc, wp-login, …) trip sooner. It catches floods
+  # generically — no per-endpoint rule needed.
+  rate_limit:
+    enabled: true
+    window: "1m"
+    burst: 300                # max weighted requests per window per IP
+    sensitive_weight: 20      # each sensitive-path hit costs this many tokens
+    sensitive_paths: ["/xmlrpc.php", "/wp-login.php", "/wp-cron.php", "/wp-comments-post.php"]
+    action: "rate-limit"      # rate-limit | challenge | ban | block | log-only
+    response_code: 429
+  # Request-anomaly scoring: generic bot/scanner signals (offensive User-Agents,
+  # missing browser headers, scanner paths, traversal/injection markers, abusive
+  # methods). Over `threshold` the action fires; browsers pass a challenge, bots
+  # do not.
+  anomaly:
+    enabled: true
+    threshold: 100
+    action: "challenge"       # challenge | block | rate-limit | ban | log-only
+    response_code: 403
+  max_tracked_ips: 65536      # LRU capacity for the per-IP governor; restart to change
+
 # CDN-style content cache. When enabled, GET responses whose path ends in one of
 # `extensions` are stored in memory for `ttl` and served directly by smoker
 # (no backend round-trip) until they expire. Only safe responses are cached

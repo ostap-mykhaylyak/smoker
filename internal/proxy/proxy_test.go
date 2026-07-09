@@ -17,6 +17,7 @@ import (
 	"github.com/ostap-mykhaylyak/smoker/internal/config"
 	"github.com/ostap-mykhaylyak/smoker/internal/detect"
 	"github.com/ostap-mykhaylyak/smoker/internal/logging"
+	"github.com/ostap-mykhaylyak/smoker/internal/protect"
 	"github.com/ostap-mykhaylyak/smoker/internal/reputation"
 	"github.com/ostap-mykhaylyak/smoker/internal/session"
 )
@@ -49,6 +50,25 @@ http:
     path:
       - "{{BaseURL}}/gate"
 action: challenge
+`
+
+// xmlrpcRate is a cookieless behavioral rate-limit (the real-world xmlrpc flood
+// rule): 2nd+ hit to /xmlrpc.php within the window is throttled. It must fire on
+// IP alone, even when the client rotates its User-Agent and sends no cookie.
+const xmlrpcRate = `
+id: itest-xmlrpc-rl
+info:
+  severity: medium
+http:
+  - path:
+      - "{{BaseURL}}/xmlrpc.php"
+session-matchers:
+  checks:
+    - type: endpoint-rate-limit
+      value: 2
+      window: 1h
+action: rate-limit
+action-response-code: 429
 `
 
 type testEnv struct {
@@ -155,7 +175,7 @@ logging:
 
 	engine := detect.NewEngine(tr)
 	var sigs []*detect.CompiledSignature
-	for _, y := range []string{sqli, gateChallenge} {
+	for _, y := range []string{sqli, gateChallenge, xmlrpcRate} {
 		tmpl, err := detect.ParseTemplate([]byte(y))
 		if err != nil {
 			t.Fatal(err)
@@ -175,8 +195,12 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
+	guard, err := protect.New(cfg.Protection.MaxTrackedIPs)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	px := New(Deps{Config: cfgMgr, Engine: engine, Rep: rep, Tracker: tr, Challenge: ch, Logs: logs, Cache: cc})
+	px := New(Deps{Config: cfgMgr, Engine: engine, Rep: rep, Tracker: tr, Challenge: ch, Logs: logs, Cache: cc, Guard: guard})
 	return &testEnv{px: px, backend: backend, rep: rep, tracker: tr, imgHits: &imgHits, dir: dir}
 }
 
@@ -543,5 +567,74 @@ func TestNonCacheablePathNotCached(t *testing.T) {
 	rr := do(env.px, "GET", "http://shop.example/api/data", "203.0.113.63")
 	if got := rr.Header().Get("X-Cache"); got != "" {
 		t.Errorf("non-cacheable path must have no X-Cache header, got %q", got)
+	}
+}
+
+func TestProactiveFloodGovernor(t *testing.T) {
+	// Rule-free flood protection: a per-IP weighted budget throttles a sensitive
+	// endpoint with no hand-written rule. Small burst + weight so 2 pass, 3rd trips.
+	env := setup(t, "protection:\n  enabled: true\n  rate_limit:\n    burst: 40\n    sensitive_weight: 20\n    sensitive_paths: [\"/flood\"]")
+	ip := "203.0.113.80"
+	hdr := map[string]string{"User-Agent": "Mozilla/5.0"}
+	for i := 0; i < 2; i++ {
+		rr := doH(env.px, "POST", "http://shop.example/flood", ip, hdr)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d should pass the governor, got %d", i, rr.Code)
+		}
+	}
+	rr := doH(env.px, "POST", "http://shop.example/flood", ip, hdr)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("3rd request over the per-IP budget must be throttled (429), got %d", rr.Code)
+	}
+}
+
+func TestProactiveAnomalyChallengesScanner(t *testing.T) {
+	// Rule-free bot protection: an offensive-tool User-Agent scores over the
+	// anomaly threshold and is challenged (browsers pass, the scanner cannot).
+	env := setup(t, "protection:\n  enabled: true")
+	rr := doH(env.px, "GET", "http://shop.example/", "203.0.113.81",
+		map[string]string{"User-Agent": "sqlmap/1.7", "Accept": "*/*", "Accept-Language": "en"})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("scanner UA should be challenged (503), got %d", rr.Code)
+	}
+}
+
+func TestProtectionDisabledByDefault(t *testing.T) {
+	// With protection off (default), a scanner UA is NOT proactively challenged
+	// (only signature rules apply), so existing behavior is unchanged.
+	env := setup(t)
+	rr := doH(env.px, "GET", "http://shop.example/", "203.0.113.82",
+		map[string]string{"User-Agent": "sqlmap/1.7"})
+	if rr.Code == http.StatusServiceUnavailable {
+		t.Error("protection is opt-in; a scanner UA must not be challenged when disabled")
+	}
+}
+
+// Regression: a cookieless flood that rotates its User-Agent every request must
+// still be rate-limited, because behavioral tracking keys a cookieless client on
+// the IP alone (not a per-request cookie or an IP+UA fingerprint). Reproduces the
+// real-world xmlrpc.php flood that was slipping through.
+func TestBehavioralRateLimitByIPIgnoresUARotation(t *testing.T) {
+	env := setup(t)
+	ip := "203.0.113.70"
+	uas := []string{
+		"Jetpack by WordPress.com",
+		"Jetpack/12.0; WordPress/6.3; http://site63925488.com",
+		"Jetpack/13.0; WordPress/6.3; http://site24195772.com",
+	}
+
+	// 1st hit (no cookie): allowed.
+	rr := doH(env.px, "POST", "http://shop.example/xmlrpc.php", ip,
+		map[string]string{"User-Agent": uas[0]})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("1st xmlrpc hit should pass, got %d", rr.Code)
+	}
+
+	// 2nd hit, different UA, still no cookie: must be throttled (429) despite the
+	// rotated User-Agent, proving the key is the IP.
+	rr = doH(env.px, "POST", "http://shop.example/xmlrpc.php", ip,
+		map[string]string{"User-Agent": uas[1]})
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("2nd xmlrpc hit from same IP (rotated UA, no cookie) must be rate-limited, got %d", rr.Code)
 	}
 }

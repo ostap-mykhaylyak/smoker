@@ -15,8 +15,8 @@ func TestSignedSIDRoundtrip(t *testing.T) {
 	}
 }
 
-// A forged or rotated cookie must NOT verify, so the caller falls back to the
-// IP+UA fingerprint (which a client cannot rotate) — closing the behavioral
+// A forged or rotated cookie must NOT verify, so the caller falls back to keying
+// on the connection IP (which a client cannot rotate) — closing the behavioral
 // rate-limit evasion.
 func TestSignedSIDRejectsForgery(t *testing.T) {
 	secret := []byte("a-sufficiently-long-test-secret")

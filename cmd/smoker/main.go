@@ -29,6 +29,7 @@ import (
 	"github.com/ostap-mykhaylyak/smoker/internal/firewall"
 	"github.com/ostap-mykhaylyak/smoker/internal/logging"
 	"github.com/ostap-mykhaylyak/smoker/internal/paths"
+	"github.com/ostap-mykhaylyak/smoker/internal/protect"
 	"github.com/ostap-mykhaylyak/smoker/internal/proxy"
 	"github.com/ostap-mykhaylyak/smoker/internal/reputation"
 	"github.com/ostap-mykhaylyak/smoker/internal/session"
@@ -224,6 +225,16 @@ func run(cfgPath string, noFirewall bool) error {
 		"enabled", cfg.Cache.Enabled, "ttl", cfg.Cache.TTL.Std().String(),
 		"max_entries", cfg.Cache.MaxEntries, "extensions", len(cfg.Cache.Extensions))
 
+	// --- Proactive protection (rule-free flood governor + anomaly scoring) ---
+	guard, err := protect.New(cfg.Protection.MaxTrackedIPs)
+	if err != nil {
+		return fmt.Errorf("protection: %w", err)
+	}
+	logs.Service.Info("proactive protection ready",
+		"enabled", cfg.Protection.Enabled,
+		"rate_limit", cfg.Protection.RateLimit.Enabled,
+		"anomaly", cfg.Protection.Anomaly.Enabled)
+
 	// --- Proxy core ---
 	px := proxy.New(proxy.Deps{
 		Config:    cfgMgr,
@@ -233,6 +244,7 @@ func run(cfgPath string, noFirewall bool) error {
 		Challenge: chMgr,
 		Logs:      logs,
 		Cache:     contentCache,
+		Guard:     guard,
 		Secret:    secret,
 	})
 

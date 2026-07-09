@@ -9,19 +9,6 @@ import (
 	"strings"
 )
 
-// sidFor derives a stable fingerprint from client IP + User-Agent. Used as the
-// fallback session key when no valid smoker cookie is present. Because it is
-// derived from the connection's real IP (not client-controlled), a client
-// cannot rotate it to spawn fresh sessions and evade behavioral rate limits.
-func sidFor(ip, ua string) string {
-	h := sha256.New()
-	h.Write([]byte(ip))
-	h.Write([]byte{0})
-	h.Write([]byte(ua))
-	sum := h.Sum(nil)
-	return hex.EncodeToString(sum[:16])
-}
-
 // newRequestID returns a short random identifier for a single request. It is
 // exposed to the visitor (X-Request-Id header + shown on block/challenge pages)
 // and written to access.log/blocked.log, so an operator can correlate a user
@@ -48,7 +35,7 @@ func newSignedSID(secret []byte) string {
 
 // verifySID validates a cookie value and returns the embedded id if the HMAC
 // checks out. An attacker-supplied or rotated cookie fails verification, so the
-// caller falls back to the IP+UA fingerprint (which cannot be rotated away).
+// caller falls back to keying on the connection IP (which cannot be rotated away).
 func verifySID(secret []byte, cookie string) (string, bool) {
 	dot := strings.LastIndexByte(cookie, '.')
 	if dot <= 0 || dot == len(cookie)-1 {

@@ -149,6 +149,49 @@ and promote after tuning. New behavioral templates default to `log-only`.
 To generate new rules with an LLM, hand it the self-contained spec in
 [`docs/RULE_AUTHORING_PROMPT.md`](docs/RULE_AUTHORING_PROMPT.md).
 
+## Proactive protection (rule-free)
+
+Beyond the signature engine, smoker has a **proactive** layer that defends every
+site *without* a template per attack — the automatic bot/flood mitigation you
+expect from a commercial WAF. It runs before the signature engine and before the
+backend, keyed on the real client IP, and feeds the same actions
+(challenge / rate-limit / ban / block / log-only) and logging. Opt-in but
+pre-tuned (`protection.enabled: true`).
+
+- **Per-IP flood governor** — a token-bucket request budget per IP over a sliding
+  window. Abuse-prone endpoints cost more (`sensitive_weight` on
+  `sensitive_paths` like `/xmlrpc.php`, `/wp-login.php`), so floods trip sooner
+  while normal browsing (many asset requests) stays under budget. This throttles
+  volumetric abuse **without** a hand-written rule per endpoint. Default action
+  `rate-limit` (429), appropriate for headless server-to-server callers.
+
+- **Anomaly scoring** — each request accrues a score from generic bot/scanner
+  signals: offensive tool User-Agents (sqlmap, nikto, nuclei, wpscan, …), missing
+  browser headers (`Accept` / `Accept-Language`), scanner paths (`/.env`,
+  `/.git/`, `/phpmyadmin`, …), traversal/injection markers, and abusive methods
+  (`TRACE`/`CONNECT`). Over `threshold` (default 100) the action fires — default
+  `challenge`, so real browsers pass and headless scanners do not.
+
+```yaml
+protection:
+  enabled: true
+  rate_limit:
+    window: "1m"
+    burst: 300
+    sensitive_weight: 20
+    sensitive_paths: ["/xmlrpc.php", "/wp-login.php", "/wp-cron.php", "/wp-comments-post.php"]
+    action: "rate-limit"
+  anomaly:
+    threshold: 100
+    action: "challenge"     # start with "log-only" to observe in blocked.log, then promote
+```
+
+Verdicts are logged to `blocked.log` with `template_id` `protect:rate-governor`
+or `protect:anomaly` and a `reason`. Whitelisted IPs bypass it entirely; behind a
+CDN, configure `trusted_proxies` so the governor keys on the real visitor. This
+layer complements — it does not replace — targeted signature rules for
+site-specific policies (e.g. "at most 1 xmlrpc call/hour").
+
 ### Hot reload
 
 Templates recompile without a restart: an fsnotify watch on

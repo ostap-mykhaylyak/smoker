@@ -35,6 +35,7 @@ import (
 	"github.com/ostap-mykhaylyak/smoker/internal/config"
 	"github.com/ostap-mykhaylyak/smoker/internal/detect"
 	"github.com/ostap-mykhaylyak/smoker/internal/logging"
+	"github.com/ostap-mykhaylyak/smoker/internal/protect"
 	"github.com/ostap-mykhaylyak/smoker/internal/reputation"
 	"github.com/ostap-mykhaylyak/smoker/internal/session"
 )
@@ -84,8 +85,9 @@ type Proxy struct {
 	tracker   session.Tracker
 	challenge *challenge.Manager
 	logs      *logging.Loggers
-	cache     *cache.Cache // optional CDN-style content cache (nil = disabled)
-	secret    []byte       // HMAC key for signing the session cookie
+	cache     *cache.Cache  // optional CDN-style content cache (nil = disabled)
+	guard     *protect.Guard // proactive protection state (nil = disabled)
+	secret    []byte        // HMAC key for signing the session cookie
 
 	rp *httputil.ReverseProxy
 }
@@ -100,6 +102,8 @@ type Deps struct {
 	Logs      *logging.Loggers
 	// Cache is the optional content cache. nil disables caching entirely.
 	Cache *cache.Cache
+	// Guard is the optional proactive protection layer. nil disables it.
+	Guard *protect.Guard
 	// Secret signs the session cookie so it cannot be forged/rotated to evade
 	// behavioral rate limits.
 	Secret string
@@ -115,6 +119,7 @@ func New(d Deps) *Proxy {
 		challenge: d.Challenge,
 		logs:      d.Logs,
 		cache:     d.Cache,
+		guard:     d.Guard,
 		secret:    []byte(d.Secret),
 	}
 
@@ -254,12 +259,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// body is preserved for the backend, never truncated).
 	view := p.buildView(r)
 
+	// (5) Signature + behavioral engine. Explicit rules take precedence, so a
+	// hand-written block/ban is never downgraded by the proactive layer below.
 	dec := p.engine.Inspect(view, sessionKey)
-
-	// (5) Apply action.
 	if dec.Matched {
 		p.applyAction(w, r, clientIP, sessionKey, dec, cfg, view, start)
 		return
+	}
+
+	// (5b) Proactive protection (rule-free): per-IP flood governor + anomaly
+	// scoring. Runs after signatures (so it never weakens an explicit rule) but
+	// before the cache and the backend, catching generic bot/flood/scanner abuse
+	// that no template covers.
+	if p.guard != nil && cfg.Protection.Enabled {
+		if gdec, ok := p.guard.Assess(r, clientIP, guardOptions(cfg)); ok {
+			p.applyAction(w, r, clientIP, sessionKey, gdec, cfg, view, start)
+			return
+		}
 	}
 
 	// (6) Clean passthrough — served from the content cache when possible.
@@ -671,17 +687,20 @@ func (p *Proxy) buildView(r *http.Request) *detect.RequestView {
 	}
 }
 
-// ensureSession returns a stable session key for the request and, when the
-// client presents no valid session cookie, mints a signed one and sets it on the
-// response (set=true). Establishing the cookie up front — rather than only on
-// the first backend response — keeps the session identity constant across the
-// whole challenge flow, so a passed challenge and behavioral history survive
-// instead of resetting when the id switches from fingerprint to cookie.
+// ensureSession returns the session key used for behavioral tracking and, when
+// the client presents no valid session cookie, mints a signed one and sets it on
+// the response (set=true).
 //
-// A valid existing cookie yields "sid:<id>". A newly minted cookie also yields
-// "sid:<id>" for the id just issued. Only if minting fails does it fall back to
-// the IP+UA fingerprint ("fp:<h>"), which is bound to the connection IP and so
-// cannot be rotated to spawn fresh sessions and evade behavioral rate limits.
+//   - A valid smoker cookie yields "sid:<id>" — a precise, unforgeable per-browser
+//     identity that survives IP changes (mobile) and distinguishes users behind a
+//     shared NAT.
+//   - Otherwise the key is "ip:<clientIP>". Keying a cookieless request on the
+//     connection IP is deliberate: it is stable across User-Agent AND cookie
+//     rotation, so a headless bot cannot spawn a fresh session per request to slip
+//     past behavioral rate limits (the classic xmlrpc.php / wp-login flood, where
+//     the attacker rotates the UA every hit). A fresh signed cookie is still set,
+//     so a real browser upgrades to a stable "sid:" on its next request and the
+//     challenge flow gets a durable identity once that cookie is presented back.
 func (p *Proxy) ensureSession(w http.ResponseWriter, r *http.Request, ip string) (key string, set bool) {
 	cfg := p.cfg.Get()
 	if c, err := r.Cookie(cfg.Session.CookieName); err == nil && c.Value != "" {
@@ -689,22 +708,23 @@ func (p *Proxy) ensureSession(w http.ResponseWriter, r *http.Request, ip string)
 			return "sid:" + id, false
 		}
 	}
-	val := newSignedSID(p.secret)
-	dot := strings.IndexByte(val, '.')
-	if val == "" || dot <= 0 {
-		return "fp:" + sidFor(ip, r.UserAgent()), false
+	key = "ip:" + ip
+	if val := newSignedSID(p.secret); val != "" {
+		if dot := strings.IndexByte(val, '.'); dot > 0 {
+			cookie := &http.Cookie{
+				Name:     cfg.Session.CookieName,
+				Value:    val,
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   r.TLS != nil,
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   int(cfg.Session.TTL.Std().Seconds()),
+			}
+			w.Header().Add("Set-Cookie", cookie.String())
+			set = true
+		}
 	}
-	cookie := &http.Cookie{
-		Name:     cfg.Session.CookieName,
-		Value:    val,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(cfg.Session.TTL.Std().Seconds()),
-	}
-	w.Header().Add("Set-Cookie", cookie.String())
-	return "sid:" + val[:dot], true
+	return key, set
 }
 
 // --- logging helpers ---
@@ -730,6 +750,46 @@ func (p *Proxy) logAccess(ip string, r *http.Request, status int, bytes int64, d
 // different vhosts and query strings are cached separately.
 func cacheKey(r *http.Request) string {
 	return r.Method + " " + r.Host + " " + r.URL.RequestURI()
+}
+
+// guardOptions maps the hot-reloadable protection config into protect.Options.
+func guardOptions(cfg *config.Config) protect.Options {
+	pc := cfg.Protection
+	return protect.Options{
+		Rate: protect.RateOptions{
+			Enabled:         pc.RateLimit.Enabled,
+			Window:          pc.RateLimit.Window.Std(),
+			Burst:           pc.RateLimit.Burst,
+			SensitiveWeight: pc.RateLimit.SensitiveWeight,
+			SensitivePaths:  pc.RateLimit.SensitivePaths,
+			Action:          actionOf(pc.RateLimit.Action, detect.ActionRateLimit),
+			RespCode:        pc.RateLimit.ResponseCode,
+		},
+		Anomaly: protect.AnomalyOptions{
+			Enabled:   pc.Anomaly.Enabled,
+			Threshold: pc.Anomaly.Threshold,
+			Action:    actionOf(pc.Anomaly.Action, detect.ActionChallenge),
+			RespCode:  pc.Anomaly.ResponseCode,
+		},
+	}
+}
+
+// actionOf maps a config action string to a detect.Action, falling back to def.
+func actionOf(s string, def detect.Action) detect.Action {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "block":
+		return detect.ActionBlock
+	case "challenge":
+		return detect.ActionChallenge
+	case "rate-limit":
+		return detect.ActionRateLimit
+	case "ban":
+		return detect.ActionBan
+	case "log-only":
+		return detect.ActionLogOnly
+	default:
+		return def
+	}
 }
 
 func (p *Proxy) logBlocked(ip string, r *http.Request, templateID, reason, action, severity string, status int) {
