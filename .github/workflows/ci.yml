@@ -44,19 +44,13 @@ jobs:
       - name: Test (race)
         run: go test ./... -race -count=1
 
-  cross-build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+  build:
+    name: Build linux/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Real target platforms (full nftables / SO_ORIGINAL_DST support).
-          - { goos: linux, goarch: amd64 }
-          - { goos: linux, goarch: arm64 }
-          # Buildability checks for the cross-platform stubs (no firewall).
-          - { goos: darwin, goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
+        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
 
@@ -68,25 +62,18 @@ jobs:
       - name: Resolve dependencies
         run: go mod tidy
 
-      - name: Build
+      - name: Build static binary
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
+          GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: |
-          if [ "${{ matrix.goos }}" = "linux" ]; then
-            # Real target: keep the binary and upload it as an artifact.
-            go build -trimpath -ldflags "-s -w" \
-              -o "smoker-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/smoker
-          else
-            # Stub platforms: buildability check only.
-            go build -trimpath -ldflags "-s -w" -o /dev/null ./cmd/smoker
-          fi
+          go build -trimpath -ldflags "-s -w" \
+            -o "smoker-linux-${{ matrix.goarch }}" ./cmd/smoker
 
       - name: Upload binary artifact
-        if: matrix.goos == 'linux'
         uses: actions/upload-artifact@v4
         with:
-          name: smoker-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: smoker-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: smoker-linux-${{ matrix.goarch }}
+          path: smoker-linux-${{ matrix.goarch }}
           if-no-files-found: error

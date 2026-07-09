@@ -85,9 +85,9 @@ type Proxy struct {
 	tracker   session.Tracker
 	challenge *challenge.Manager
 	logs      *logging.Loggers
-	cache     *cache.Cache  // optional CDN-style content cache (nil = disabled)
+	cache     *cache.Cache   // optional CDN-style content cache (nil = disabled)
 	guard     *protect.Guard // proactive protection state (nil = disabled)
-	secret    []byte        // HMAC key for signing the session cookie
+	secret    []byte         // HMAC key for signing the session cookie
 
 	rp *httputil.ReverseProxy
 }

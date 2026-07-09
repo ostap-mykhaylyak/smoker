@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-func entry(body string, exp time.Time) *Entry {
+func entry(body string, stored, exp time.Time) *Entry {
 	return &Entry{
 		Status:  200,
 		Header:  http.Header{"Content-Type": {"image/png"}},
 		Body:    []byte(body),
-		Stored:  exp.Add(-time.Minute),
+		Stored:  stored,
 		Expires: exp,
 	}
 }
@@ -27,7 +27,8 @@ func TestPutGet(t *testing.T) {
 	if _, ok := c.Get("k"); ok {
 		t.Fatal("empty cache must miss")
 	}
-	c.Put("k", entry("hello", base.Add(time.Hour)))
+	// Stored 60s ago, expires in an hour -> Age is 60.
+	c.Put("k", entry("hello", base.Add(-time.Minute), base.Add(time.Hour)))
 	e, ok := c.Get("k")
 	if !ok {
 		t.Fatal("expected a hit")
@@ -44,7 +45,7 @@ func TestExpiryEvicts(t *testing.T) {
 	c, _ := New(8)
 	base := time.Unix(1_700_000_000, 0)
 	c.now = func() time.Time { return base }
-	c.Put("k", entry("x", base.Add(30*time.Second)))
+	c.Put("k", entry("x", base, base.Add(30*time.Second)))
 
 	c.now = func() time.Time { return base.Add(31 * time.Second) }
 	if _, ok := c.Get("k"); ok {
@@ -60,9 +61,9 @@ func TestLRUCapacity(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	c.now = func() time.Time { return base }
 	exp := base.Add(time.Hour)
-	c.Put("a", entry("a", exp))
-	c.Put("b", entry("b", exp))
-	c.Put("c", entry("c", exp)) // evicts the least-recently-used ("a")
+	c.Put("a", entry("a", base, exp))
+	c.Put("b", entry("b", base, exp))
+	c.Put("c", entry("c", base, exp)) // evicts the least-recently-used ("a")
 	if _, ok := c.Get("a"); ok {
 		t.Error("a should have been evicted at capacity")
 	}
